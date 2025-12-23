@@ -14,33 +14,29 @@ from src.report_generator import ReportGenerator as rg
 
 # endregion
 
+"""
+Script to collect raw data and save it to an excel file
+"""
 
 def main():
     
     # load configs
     cfg = ConfigLoader(root_dir / "config.yaml")
     molecules,mzs,rts = cfg.load_collection_info()
-
+    
     # convert .d files to mzML and pull intensity matrix objects
     processor = mp(cfg)
     matrices = processor.full_bulk_convert()
 
-    # collect raw data
+    # collect data
     output = im.collect_data(matrices,molecules,mzs,rts)
     
     # generate report
-    report = rg(cfg,output)
+    report = rg(output)
     # generate data matrix
     report.generate_matrix()
-    # genearte normalized matrix
-    report.normalize_matrix()
     # write to excel file
-    report.write_to_excel()
-
-    # write qc report
-    report.generate_report()
-
-    
+    report.write_to_excel("raw")
 
 if __name__ ==  "__main__":
     main()

@@ -123,12 +123,9 @@ class ConfigLoader:
         
         # read file (without header) and load moleucle, mz values, and retention times to lists
         df = pd.read_excel(file,skiprows=3)
-        df.dropna(subset=["molecules","mz","rt"],inplace=True)
 
-        molecules = df["molecules"].to_list()
-        mzs = df["mz"].to_list()
-        rts = df["rt"].to_list()
-        case = df["case"].dropna().to_list()
-        control = df["control"].dropna().to_list()
+        molecules = df["molecule"].dropna().to_list()
+        mzs = df["mz"].dropna().to_list()
+        rts = df["rt"].dropna().to_list()
 
-        return molecules, mzs, rts, case, control
+        return molecules, mzs, rts

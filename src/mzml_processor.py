@@ -35,35 +35,58 @@ class MzMLProcessor:
         """
         # load config
         cfg = self.cfg
-        input_dir = cfg.get("input_dir")
+        input_dir = Path(cfg.get("input_dir"))
+        mzml_dir = input_dir / cfg.get("mzml_dir")
 
-        # find all .d inputs in input directory
-        samples_in = input_dir.glob("*.d")
+        # check to see if mzml files are already converted
+        mzml_files = list(mzml_dir.glob("*.mzML"))
+        samples_in = list(input_dir.glob("*.D"))
 
-        # get out_dir
-        mzml_dir = Path(input_dir) / "mzml_files"
-        mzml_dir.mkdir(parents=True,exist_ok=True)
+        # generate list of input file names
+        in_names = []
+        for in_file in samples_in:
+            in_names.append(in_file.stem)
+        
+        # assume input files have already been processed
+        process = False
 
-        # get log_dir
-        log_dir = Path(input_dir) / "logs.jsonl"
+        # if mzml files exist make sure every input file has a corrosponding mzml
+        if mzml_files:
+            for file in mzml_files:
+                mzml_name = file.stem
+                if mzml_name not in in_names:
+                    process = True
+        else:
+            process = True
 
-        # run each msconvert and log results
-        for sample in samples_in:
-            sample_name = str(sample.stem)
-            if sample.is_dir():
-                cmd = [
-                    "msconvert",
-                    str(sample),
-                    "--mzML",
-                    "--outdir", str(mzml_dir)
-                ]
+        if process:
+            # ensure mzml dir exists
+            mzml_dir.mkdir(parents=True,exist_ok=True)
 
-                result = subprocess.run(cmd,check=True,capture_output=True,text=True)
+            # get log_dir
+            log_dir = input_dir
 
-                log_subprocess(result,log_dir,sample_name)
+            # run each msconvert and log results
+            for sample in samples_in:
+                sample_name = str(sample.stem)
+                if sample.is_dir():
+                    cmd = [
+                        "msconvert",
+                        str(sample),
+                        "--mzML",
+                        "--outdir", str(mzml_dir)
+                    ]
 
+                    result = subprocess.run(cmd,check=True,capture_output=True,text=True)
+
+                    log_subprocess(result,log_dir,sample_name)
+            
+            # generate new list of valid mzml files
+            mzml_files = list(mzml_dir.glob("*.mzML"))
+    
+        # sort mzml files
+        mzml_files = sorted(mzml_files, key=lambda f: f.stem)
         matrices = []
-        mzml_files = mzml_dir.glob("*.mzML")
         for file in mzml_files:
             matrix = self.create_intensity_matrix(file)
             matrices.append(matrix)
@@ -232,7 +255,7 @@ class MzMLProcessor:
         binned_mzs.append(9999)
 
         # create intensity matrix object
-        output_matrix = IntensityMatrix(final_matrix,binned_mzs,name,spectra_metadata)
+        output_matrix = IntensityMatrix(intensity_matrix=final_matrix,unique_mzs=binned_mzs,spectra_name=name,spectra_metadata=spectra_metadata)
 
         return output_matrix
          

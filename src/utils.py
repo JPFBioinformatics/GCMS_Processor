@@ -1,4 +1,5 @@
-import datetime,subprocess,json
+import subprocess,json
+from datetime import datetime
 from pathlib import Path
 from openpyxl import load_workbook
 import pandas as pd
@@ -31,13 +32,16 @@ def log_subprocess(result: subprocess.CompletedProcess, log_dir: Path, id: str):
     with open(log_file, "a") as f:
         f.write(json.dumps(data) + "\n")
 
-def generate_template(file: Path = "template.xlsx"):
+def generate_template(input_dir: Path, file: Path = "template.xlsx"):
     """
     generates a templeate xlsx file for iputting m/z and rt values
+    Params:
+        input_dir                       input directory for files to be analyzed
+        file                            name/location of template file
     """
 
     header1 = "Template file for gcms automatic peak picking/integration, please ONLY fill in appropriate values and feel free to leave case/control empty if need be"
-    header2 = "molecule = id of this moleucke, mz = ion to measure, rt = peak retention time case/control = list of sample names in each group"
+    header2 = "molecule = id of this moleucue, mz = ion to measure, rt = peak retention time case/control = list of sample names in each group (as they appear in input file names)"
 
     df = pd.DataFrame(columns=["molecule","mz","rt","case","control"])
     df.to_excel(file,index=False,startrow=3,startcol=1)
@@ -49,4 +53,4 @@ def generate_template(file: Path = "template.xlsx"):
     ws["A2"] = header2
 
     wb.save(file)
-    
+

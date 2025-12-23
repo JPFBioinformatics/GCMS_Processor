@@ -4,6 +4,7 @@ import sys
 import numpy as np
 from scipy.signal import find_peaks
 from pathlib import Path
+import matplotlib.pyplot as plt
 
 # location of pipeline root dir
 root_dir = Path(__file__).resolve().parent.parent
@@ -14,11 +15,10 @@ from src.config_loader import ConfigLoader
 
 # endregion
 
-
 # Class for storage and cleaning of intensity matrix extracted by mzml_processor
 class IntensityMatrix:
 
-    def __init__(self, intensity_matrix: np.ndarray, unique_mzs: list, cfg: ConfigLoader, spectra_name: str = None, spectra_metadata: dict = None):
+    def __init__(self, intensity_matrix: np.ndarray, unique_mzs: list, spectra_name: str = None, spectra_metadata: dict = None, cfg: ConfigLoader = ConfigLoader(root_dir / "config.yaml")):
         self.intensity_matrix = intensity_matrix
         self.unique_mzs = unique_mzs
         self.spectra_metadata = spectra_metadata
@@ -36,7 +36,7 @@ class IntensityMatrix:
         # identify peaks in this intensity matrix
         self.identify_peaks(self.intensity_matrix)
         
-    #region Getter/Setters
+    # region Getter/Setters
     @property
     def intensity_matrix(self):
         return self._intensity_matrix
@@ -303,14 +303,14 @@ class IntensityMatrix:
                 continue
             
             # calculate baseline
-            baseline = self.tentative_baseline(left_bound,right_bound,array)
+            baseline = self.tentative_baseline(left_bound, right_bound, array)
 
             # calcluate quadratic fit for peak
             fit = self.quadratic_fit(array,max)
 
             # grab the precise location and height of the peak
             precise_max_location = fit['x_values'][1]
-            precise_max_height = fit['y_values'][1] - (baseline['slope']*(precise_max_location-baseline['left_bound']) + baseline['y_int'])
+            precise_max_height = fit['y_values'][1] - (baseline['slope']*(precise_max_location - baseline['left_bound']) + baseline['y_int'])
             precise_max_abundance = fit['y_values'][1]
             
             # finds the bin (0.1 of a scan) that the precise max is located within by truncating at 1 decimal point
@@ -332,6 +332,23 @@ class IntensityMatrix:
                 'tentative_baseline': baseline
             }
 
+            # add width flag
+            width = right_bound = left_bound
+            if width < 5:
+                max_info["width_flag"] = "small"
+            elif width < 10:
+                max_info["width_flag"] = "ideal"
+            elif width < 25:
+                max_info["width_flag"] = "normal"
+            else:
+                max_info["width_flag"] = "overloaded"
+
+            # add baseline/flat top flag
+            if baseline == None:
+                max_info["flat_top"] = True
+            else:
+                max_info["flat_top"] = False
+
             # accept peak if it passes threshold check
             if self.threshold_check(array,max,precise_max_height):
                 maxima.append(max_info)
@@ -340,34 +357,68 @@ class IntensityMatrix:
         return maxima
 
     # finds the left or right deconvolution bound for a given maxima, step = 1 for right bound step = -1 for left bound
-    def find_bound(self, array, center, step):
+    def find_bound(self, array, center, step, frac: float = 0.01, max_width: int = 25):
 
         nf = self.noise_factor
-        counter = 1 * step
-        min_value = array[center]
         max_value = array[center]
+        counter = step
+        n = len(array)
+
+        # walk along flat-topped peaks
+        while(
+            abs(counter) <= max_width
+            and 0 <= center + counter < n
+            and array[center + counter] == max_value
+        ):
+            counter += step
+
+        # force a bound if plateau is not escaped
+        if abs(counter) > max_width or not (0 <= center + counter < n):
+
+            pos = center + step * max_width
+
+            if pos < 0:
+                pos = 0
+            elif pos >= n:
+                pos = n
+
+            return pos
+
+        # handle normal peaks
+        min_value = array[center + counter]
 
         # iterate up to 12 setps in given direction from center
-        while counter <= 12 and counter >= -12:
+        while(abs(counter) <= max_width 
+              and 0 <= center + counter < n
+        ):
+
+            value = array[center + counter]
             
             # if the value at this step is less than the current min, set the min to this value
-            if array[center+counter] < min_value:
-                min_value = array[center+counter]
+            if value < min_value:
+                min_value = value
 
-            # if the value at this step is less than 5% of close window here
-            if array[center+counter] < 0.01*max_value:
-                return center+counter
+            # if the value at this step is less than frac of max close window here
+            if value < frac * max_value:
+                return center + counter
             
             # if the value at this step is more than 5 nf greater than the minimum close the window at the previous step
-            if array[center+counter] > 5*nf+min_value:
-                return center+counter-step
+            if value > 5 * nf + min_value:
+                return center + counter - step
             
             # increment counter
             counter += step
 
-        # if no previous checks returned a value close window at 12 steps from the max
-        return center+step*12
-    
+        # if no previous checks returned a value close window at 25 steps from the max
+        pos = center + step * max_width
+
+        if pos < 0:
+            pos = 0
+        elif pos >= n:
+            pos = n
+
+        return pos
+
     # finds a quadratic fit for a set of 3 points in an array
     def quadratic_fit(self, array, center):
 
@@ -412,10 +463,13 @@ class IntensityMatrix:
         # holds the sum of all rates of sharpness calculated for the peak
         rate_sum = 0
 
+        # value to prevent divide by 0 errors
+        eps = 1e-12
+
         # loop over all the scans in the 3 scan window and calculate rate for each
         for i in range(1,4):
-            term1 = (row[max+(i+1)] - row[max+i]) / row[max+i]
-            term2 = (row[max-(i+1)] - row[max-i]) / row[max-i]
+            term1 = (row[max+(i+1)] - row[max+i]) / (row[max+i] + eps)
+            term2 = (row[max-(i+1)] - row[max-i]) / (row[max-i] + eps)
 
             rate_sum += term1+term2
 
@@ -431,12 +485,17 @@ class IntensityMatrix:
         # create componenet array 
         component_array = array[left_bound:right_bound+1]
 
+        # return no baseline if the peak is all flat top
+        peak_range = component_array.max() - component_array.min()
+        if peak_range == 0:
+            return None
+        
         # creates an x-values array to use later for baseline computing, each x value is just an index value for input array
         x = np.arange(len(component_array))
 
         # get the index of the peak maximum
         max_idx = np.argmax(component_array)
-
+        
         # get the index values of the minimum on the left and on the right of the max
         left_idx = np.argmin(component_array[:max_idx])
         right_idx = np.argmin(component_array[max_idx:]) + max_idx
@@ -446,19 +505,27 @@ class IntensityMatrix:
         right_val = component_array[right_idx]
 
         # get linear baseline variables
-        m = (right_val - left_val) / (right_idx - left_idx) 
+        m = (right_val - left_val) / (right_idx - left_idx)
         b = left_val - m * left_idx
 
         # generate tentative baseline array
-        tentative_baseline = m * x + b
+        baseline_array = m * x + b
 
         # shfit baseline down if any of its values are greater than the value of input array at same index
-        for idx, element in enumerate(tentative_baseline):
+        for idx, element in enumerate(baseline_array):
             if element > component_array[idx]:
                 diff = element - component_array[idx]
-                tentative_baseline -= diff
+                baseline_array -= diff
 
-        return tentative_baseline
+        output = {
+            'baseline_array' : baseline_array,
+            'slope': m,
+            'y_int': b,
+            'left_bound': left_bound,
+            'right_bound': right_bound
+        }
+
+        return output
 
     # endregion
 
@@ -511,6 +578,10 @@ class IntensityMatrix:
         Params:
             peak                    dict entry for the peak to be integrated
         """
+        # check to see if it is flat-top, if it is do not integrate
+        if peak["flat_top"]:
+            peak["area"] = 0
+            return None
 
         # get symmetry threshold
         cfg = self.cfg
@@ -530,11 +601,11 @@ class IntensityMatrix:
         # check to see how close the endpoints are
         left = signal[0]
         right = signal[-1]
-        max = signal[peak['max']]
+        max_val = signal[peak['center'] - peak["left_bound"]]
         
         # calculate % difference from each endpoint to max
-        left_diff = 100 * (max - left) / max
-        right_diff = 100 * (max - right) / max
+        left_diff = 100 * (max_val - left) / max_val
+        right_diff = 100 * (max_val - right) / max_val
 
         # calculate the diff between endpoints
         symmetry = left_diff - right_diff
@@ -545,29 +616,31 @@ class IntensityMatrix:
             peak["symmetry_valid"] = True
 
         # adjust to baseline
-        if len(signal) != len(peak['tentative_baseline']):
+        if len(signal) != len(peak['tentative_baseline']['baseline_array']):
+            print(f"Array length: {len(signal)}\nBaseline length: {len(peak['tentative_baseline'])}")
             raise ValueError("baseline and signal arrays are of different length")
         
-        net = signal - peak['tentative_baseline']
+        net = signal - peak['tentative_baseline']['baseline_array']
 
         # tarpazoidal integrate the net value
         peak_area = np.trapezoid(net)
         peak["area"] = peak_area
     
     @staticmethod
-    def collect_data(matrices: list, molecules: list, mzs: list, rts: list):
+    def collect_data(matrices: list, molecules: list, mzs: list, rts: list, type: str = "raw"):
         """
         Collects all peaks from a given list of matrices that corrospond to molecule/mz/rt gropuing specified
         Params:
             matrices                            list of IntensityMatrix objects to parse
             molecules,mzs,rts                   lists (index matched) of moleucle,mz,rt triplets
+            type                                type of data to collect "raw" or "normalized"
         Returns:
             output                              dict of sample_name: peak list values
         """
         output = {}
 
         for matrix in matrices:
-            name = matrix.name
+            name = matrix.spectra_name
             peaks = []
 
             for idx,molecule in enumerate(molecules):
@@ -584,7 +657,29 @@ class IntensityMatrix:
 
     # region Data Visualization
 
-    def histogram(self, ):
-        None
+    def width_histogram(self):
+        widths = []
+        for row in self.peak_list:
+            for peak in row:
+                width = peak["right_bound"] - peak["left_bound"]
+                widths.append(width)
+        
+        max_width = max(widths)
+        min_width = min(widths)
+
+         # bin
+        bins = np.arange(
+            min_width,
+            max_width + 2,
+            1
+        )
+        
+        plt.figure(figsize=(8,5))
+        plt.hist(widths,bins=bins)
+        plt.xlabel("Peak width (scans)")
+        plt.ylabel("Count")
+        plt.title("Peak Width Distribution")
+        plt.tight_layout()
+        plt.show()
 
     # endregion

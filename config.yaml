@@ -5,8 +5,12 @@ run_name: results
 template_file: template.xlsx
 
 # full path to the imput directory where your files to be processed live
-input_dir: SPECIFY THIS/
-# path (relative to input_dir) of the mzML file directory
+input_dir: C:\Jack\code\GCMS_Automation\data
+
+# path relative to input dir where results will be stored
+results_dir: results/
+
+# name of the file containing mzML files to process
 mzml_dir: mzml_files/
 
 rt_threshold: 0.1                   # max time (seconds) from the supplied rt a peak can be or peak is flagged
