@@ -1,12 +1,13 @@
 # region Imports
 
-import sys
+import sys, math
 from pathlib import Path
 from matplotlib.backends.backend_pdf import PdfPages
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from collections import Counter
 from openpyxl import load_workbook
+from openpyxl.styles import PatternFill
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -34,17 +35,19 @@ class ReportGenerator:
         """
         self.cfg = cfg
         self.peaks = peaks
+        self.norm = None
         self.matrix = None
-        self.data = None
-        self.groups = None
         self.value_map = None
         self.standards = None
         self.sample_map = None
         self.norm_matrix = None
+        self.norm_value_map = None
+        self.norm_standards = None
+        self.output_flags = None
 
     def save_peaks(self, peaks: dict):
         """
-        Saves a peak dict as self.peaks ifd not specified when object is creatd
+        Saves a peak dict as self.peaks if not specified when object is creatd
         Params:
             peaks                   dict of sample: peak list where each peak is a dict for the full set of samples for data analysis
         """
@@ -73,53 +76,85 @@ class ReportGenerator:
         samples = df["samples"].dropna().to_list()
         groups = df["group"].dropna().to_list()
         norm_factors = df["norm"].dropna().to_list()
-        self.norm = norm_factors
+        if norm_factors:
+            self.norm = norm_factors
         standards = df["standard"].dropna().to_list()
+        molecules = df["molecule"].dropna().to_list()
 
         # onehot encode groups and save them to matrix, updating value_map
         if groups:
-            self.num_groups = len(groups)
+            self.num_groups = len(set(groups))
             group_onehot = pd.get_dummies(groups).to_numpy()
             norm_matrix = np.hstack([norm_matrix,group_onehot])
             num_values = len(norm_value_map)
             for i,col_name in enumerate(pd.get_dummies(groups).columns):
-                norm_value_map[num_values+i] = col_name
+                norm_value_map[col_name] = num_values+i
         
-        # adjust samples to intenal standard
+        # save standard values for later use
         norm_standards = {}
-        if standards:
-            standard_idxs = []
-            for i,std_name in enumerate(standards):
-                if std_name not in self.value_map:
-                    print(self.value_map)
-                    raise ValueError(f"Standard {std_name} not found in collected values")
-                std_idx = norm_value_map[std_name]
-                norm_standards[std_name] = norm_matrix[:,std_idx].copy()
-                standard_idxs.append(std_idx)
-                norm_matrix[:,i] = norm_matrix[:,i] / norm_matrix[:,std_idx]
+        standard_idxs = []
+        stds = set(standards)
+        for standard in stds:
+            pos = norm_value_map[standard]
+            standard_idxs.append(pos)
+            abundances = norm_matrix[:,pos]
+            norm_standards[standard] = abundances
+        # sort deletion indices
+        standard_idxs = sorted(standard_idxs)
 
-            # remove standard rows from matrix/value map and rebuild map to corrospond to new matrix
-            norm_matrix = np.delete(norm_matrix, standard_idxs, axis=1)
-            for idx in sorted(standard_idxs, reverse=True):
-                norm_value_map.pop(idx,None)
-            norm_value_map = {name:i for i,name in enumerate(norm_value_map.values())}
+        print(f"Standards:")
+        for i in standard_idxs:
+            print(f"{i}\n")
+
+        # adjust samples to intenal standard
+        if standards:
+            std_map = {}
+            # generate map of molecule: standard (names)
+            for std_idx, std_name in enumerate(standards):
+                if std_name not in norm_value_map.keys():
+                    raise ValueError(f"Standard {std_name} not found in collected values")
+                std_map[molecules[std_idx]] = std_name
+            print(f"\nStandard Map:\n{std_map}\n")
+            # divide values as specified by std_map
+            for mol,std in std_map.items():
+                mol_i = norm_value_map[mol]
+                std_i = norm_value_map[std]
+                norm_matrix[:,mol_i] = norm_matrix[:,mol_i] / norm_matrix[:,std_i]
+
+            # capture column order before removing standard cols
+            ordered_cols = [
+                name for name,_ in sorted(norm_value_map.items(), key=lambda x: x[1])
+            ]
+
+            # delete the standard cols from the normalized matrix
+            norm_matrix = np.delete(norm_matrix,standard_idxs,axis=1)
+            # recreate value map based on new, one-hot encoded groups and without standards
+            final_map = {}
+            new_idx = 0
+            for name in ordered_cols:
+                if name not in stds:
+                    final_map[name] = new_idx
+                    new_idx += 1
+            print(f"Norm Matrix Dims: {norm_matrix.shape}")
+            print(f"Number of values in final map: {len(final_map)}")
 
         # adjust data to normalization factor
-        for j, sample in enumerate(samples):
-            if sample not in self.sample_map:
-                raise ValueError(f"Sample {sample} not found in collected samples")
-            norm_factor = norm_factors[j]
-            matrix_idx = self.sample_map[sample]
-            norm_matrix[matrix_idx,:] = norm_matrix[matrix_idx,:] / norm_factor
+        if norm_factors:
+            for j, sample in enumerate(samples):
+                if sample not in self.sample_map:
+                    raise ValueError(f"Sample {sample} not found in collected samples")
+                norm_factor = norm_factors[j]
+                matrix_idx = self.sample_map[sample]
+                norm_matrix[matrix_idx,:] = norm_matrix[matrix_idx,:] / norm_factor
 
         # save normalized data
         self.norm_matrix = norm_matrix
-        self.norm_value_map = norm_value_map
+        self.norm_value_map = final_map
         self.norm_standards = norm_standards
             
     def generate_template(self):
         """
-        generates a templeate xlsx file for iputting m/z and rt values
+        generates a templeate xlsx file for inputting m/z and rt values
         """
         # get input dir
         cfg = self.cfg
@@ -175,19 +210,23 @@ class ReportGenerator:
 
         wb.save(file)
 
-    def generate_report(self, sym_bin: float = 0.1, rt_bin: float = 0.01, num_pcs: int = 5):
+    def generate_report(self, num_pcs: int = 5):
         """
         Generates a single pdf report for the entire run
         """
         cfg = self.cfg
         input_dir = Path(cfg.get("input_dir"))
-        out_dir = cfg.get_path("results_dir", input_dir)
+        res = cfg.get("results_dir")
+        out_dir = input_dir / res
         name = cfg.get("run_name")
         out_file = Path(out_dir) / f"{name}_report.pdf"
 
         with PdfPages(out_file) as pdf:
             self.std_qc_plots(pdf=pdf)
-            self.qc_plots(pdf=pdf,sym_bin=sym_bin,rt_bin=rt_bin)
+            total,per_sample = self.qc_data()
+            df = self.qc_df(pdf,per_sample,total)
+            self.plot_qc_total(pdf,total)
+            self.plot_qc_per_sample(pdf,df)
             self.pca_plots(pdf=pdf,num_comps=num_pcs)
 
     def std_qc_plots(self, pdf):
@@ -203,9 +242,6 @@ class ReportGenerator:
         # generate figure
         fig,axes = plt.subplots(1,num_stds,figsize=(num_stds*2,6), squeeze=False)
 
-        # generate inverse sample map
-        inv_smaple_map = {v:k for k,v in self.sample_map.items()}
-
         for i,std_name in enumerate(std_names):
 
             # geet values for this std
@@ -213,70 +249,255 @@ class ReportGenerator:
 
             # plot
             ax = axes[0,i]
-
-            # calculate values for outlier detection
-            q1,q3 = np.percentile(values,[25,75])
-            iqr = q3-q1
-            lower = q1- 1.5 * iqr
-            upper = q3 + 1.5 * iqr
-
-            for j,val in enumerate(values):
-                if val < lower or val > upper:
-                    ax.text(1,val,inv_smaple_map[j], fontsize=8, rotation=45, ha="right")
-
+            bp = ax.boxplot(values, vert=True, showfliers=True)
             ax.set_title(f"Standard {std_name}")
             ax.set_ylabel("Abundance")
             ax.set_xticks([])
+
+            # annotate fliers
+            fliers = bp["fliers"][0].get_ydata()
+            for y in fliers:
+                idx = (values == y).nonzero()[0]
+                for i in idx:
+                    ax.annotate(
+                        i,
+                        xy=(1,y),
+                        xytext=(1.05,y),
+                        fontsize=8,
+                        va="center"
+                    )
 
         fig.tight_layout()
         pdf.savefig(fig)
         plt.close(fig)
 
-    def qc_plots(self, pdf, sym_bin: float = 0.1, rt_bin: float = 0.01, width_bin: float = 1.0):
+    def qc_data(self):
         """
-        Generates a pdf page that contains 4 plots, a bound symmetry and a rt difference histogram as well as box and whisker plots for both
+        Generates data dicts for QC plotting
+        """
+
+        if self.peaks is None:
+                raise ValueError("No peak data availabe for QC plots")
+        
+        # get metric data
+        sample_data = {}
+        total_data = {
+            "flat_top": [],
+            "width_flag": [],
+            "widths": [],
+            "rt_diffs": [],
+            "rt_valid": [],
+            "symmetry": [],
+            "sym_valid": []
+        }
+        
+        for sample,values in self.peaks.items():
+
+            # dict to hold data for this sample
+            data = {
+                "flat_top": [],
+                "width_flag": [],
+                "widths": [],
+                "rt_diffs": [],
+                "rt_valid": [],
+                "symmetry": [],
+                "sym_valid": []
+            }
+
+            for peak in values:
+       
+                # extract lists of values for analysis
+                ft = peak["flat_top"]
+                wf = peak["width_flag"]
+                w = peak["right_bound"] - peak["left_bound"]
+                rt = peak["rt_diff"]
+                rv = peak["rt_valid"]
+                sym = peak["bound_symmetry"]
+                sv = peak["symmetry_valid"]
+
+                # per-sample
+                data["flat_top"].append(ft)
+                data["width_flag"].append(wf)
+                data["widths"].append(w)
+                data["rt_diffs"].append(rt)
+                data["rt_valid"].append(rv)
+                data["symmetry"].append(sym)
+                data["sym_valid"].append(sv)
+
+                # total
+                total_data["flat_top"].append(ft)
+                total_data["width_flag"].append(wf)
+                total_data["widths"].append(w)
+                total_data["rt_diffs"].append(rt)
+                total_data["rt_valid"].append(rv)
+                total_data["symmetry"].append(sym)
+                total_data["sym_valid"].append(sv)
+
+            sample_data[sample] = data
+
+        return total_data, sample_data
+    
+    def compute_stats(self, flags_dict: dict):
+        """
+        Helper method to compute QC stats from total or sample data dicts
         Params:
-            pdf                                     pdf file to save figure to
-            sym_bin,rt_bin                          bin size for the symmetry histogram and for the retention time histogram
+            flags_dict                      dict that contains flag info for calculation
         """
+
+        num_peaks = len(flags_dict["width_flag"])
+        flat_top_pct = 100 * sum(flags_dict["flat_top"]) / num_peaks
+        width_counts = Counter(flags_dict["width_flag"])
+        width_pct = {k: 100*v/num_peaks for k,v in width_counts.items()}
+        avg_width = np.mean(flags_dict["widths"])
+        err_width = np.std(flags_dict["widths"]) / np.sqrt(num_peaks)
+        rt_invalid_pct = 100 * (sum(flags_dict["rt_valid"]) / num_peaks)
+        avg_rt = np.mean(flags_dict["rt_diffs"])
+        err_rt = np.std(flags_dict["rt_diffs"]) / np.sqrt(num_peaks)
+        sym_valid_pct = 100 * (1 - np.mean(flags_dict["sym_valid"]))
+        avg_sym = np.mean(flags_dict["symmetry"])
+        err_sym = np.std(flags_dict["symmetry"]) / np.sqrt(num_peaks)
+
+        return {
+            "flat_top_%": flat_top_pct,
+            "width_small_%": width_pct.get("small",0),
+            "width_ideal_%": width_pct.get("ideal",0),
+            "width_normal_%": width_pct.get("normal",0),
+            "width_overloaded_%": width_pct.get("overloaded",0),
+            "avg_width": avg_width,
+            "err_width": err_width,
+            "rt_invalid_%": rt_invalid_pct,
+            "avg_rt_diff": avg_rt,
+            "err_rt_diff": err_rt,
+            "sym_valid_%": sym_valid_pct,
+            "avg_symmetry": avg_sym,
+            "err_symmetry": err_sym
+            }
+    
+    def add_sample_map_page(self, pdf):
+        """
+        Adds a PDF page mapping sample names to sample indices
+        Params:
+            pdf                 pdf to save this figure to
+        """
+
+        # Convert sample_map to DataFrame
+        data = sorted(self.sample_map.items(), key=lambda x: x[1])
+        df = pd.DataFrame(data, columns=["Sample Name", "Sample Index"])
+
+        # Create figure
+        fig, ax = plt.subplots(figsize=(8, 10))
+        ax.axis("off")
+
+        table = ax.table(
+            cellText=df.values,
+            colLabels=df.columns,
+            loc="center",
+            cellLoc="center"
+        )
+
+        # Formatting
+        table.auto_set_font_size(False)
+        table.set_fontsize(9)
+        table.scale(1.0, 1.2)
+
+        fig.suptitle(
+            "Sample Index Mapping",
+            fontsize=14,
+            y=0.92
+        )
+
+        fig.tight_layout()
+        pdf.savefig(fig)
+        plt.close(fig)
+
+    def qc_df(self, pdf, sample_data: dict, total_data: dict, rows_per_page: int = 25):
+        """
+        Generates a pandas dataframe and then plots it as a data table
+        Params:
+            sample_data                     sample:data where data is another dict
+            total_data                      same as sample_data but summed for the entire run, not per sample
+        """
+
+        # add sample map page
+        self.add_sample_map_page(pdf)
+
+        # compute stats per sample
+        rows = []
+        for sample,data in sample_data.items():
+            name = sample
+            row = self.compute_stats(data)
+            row["sample"] = self.sample_map[name]
+            rows.append(row)
+
+        # compute stats for total
+        total_row = self.compute_stats(total_data)
+        total_row["sample"] = "Total"
+        rows.append(total_row)
+
+        # create df
+        df_qc = pd.DataFrame(rows)
+        df_qc = df_qc[["sample","flat_top_%","width_small_%","width_ideal_%","width_normal_%","width_overloaded_%",
+                   "avg_width","err_width","rt_invalid_%","avg_rt_diff","err_rt_diff",
+                   "sym_valid_%","avg_symmetry","err_symmetry"]]
+
+        # add table to QC PDF
+        num_pages = math.ceil(len(df_qc) / rows_per_page)
+        for page in range(num_pages):
+
+            # find rows for this page
+            start = page * rows_per_page
+            end = start + rows_per_page
+            df_chunk = df_qc.iloc[start:end]
+            formatted = df_chunk.copy()
+            for col in formatted.columns:
+                try:
+                    formatted[col] = formatted[col].apply(lambda x: f"{float(x):.4g}")
+                except:
+                    continue
+
+            # generate figure
+            fig,ax = plt.subplots(figsize=(8,10))
+            fig.tight_layout()
+            ax.axis("off")
+
+            # draw table
+            table = ax.table(
+                cellText = formatted.values,
+                colLabels = formatted.columns,
+                loc = "center",
+                cellLoc = "center"
+            )
+
+            # set fonts/scale
+            table.auto_set_font_size(False)
+            table.set_fontsize(8)
+            table.scale(1.0,1.2)
+
+            # add title
+            title = "QC Summary Table"
+            if num_pages > 1:
+                title += f" (Page {page+1} of {num_pages})"
+            fig.suptitle(title, fontsize=14, y=0.92)
+
+            pdf.savefig(fig)
+            plt.close(fig)
+        
+        return df_qc
+        
+    def plot_qc_total(self, pdf, total_data: dict, sym_bin: float = 0.1, rt_bin: float = 0.01, width_bin: float = 1.0):
+
         cfg = self.cfg
         sym_threshold = cfg.get("endpoint_threshold")
         rt_threshold = cfg.get("rt_threshold")
-
-        # grab rt diff and symmetry values
-        flat_top_flags = []
-        width_flags = []
-        widths = []
-        rt_diffs = []
-        symmetry_values = []
-        for peak in self.peaks:
-            flat_top_flags.append(peak["flat_top"])
-            width_flags.append(peak["width_flag"])
-            widths.append(peak["right_bound"] - peak["left_bound"])
-            rt_diffs.append(peak["rt_diff"])
-            symmetry_values.append(peak["bound_symmetry"])
-
-        if not rt_diffs or not symmetry_values:
-            raise ValueError("No peak data availabe for QC plots")
-
-        # calcualte flat top and width flag percents
-        percent_ft = 100 * sum(flat_top_flags) / len(flat_top_flags)
-        width_counts = Counter(width_flags)
-        num_peaks = len(width_flags)
-        percent_width = {k: 100*v/num_peaks for k,v in width_counts.items()}
-        
-        # generate summary text
-        summary_text = f"Flat-Top Peak Occurance: {percent_ft}%\n\nWidth Catagory Occurance:\n"
-        for cat,pct in percent_width.items():
-            summary_text += f"\t{cat}: {pct:.1f}%/n"
+        width_threshold = cfg.get("width_threshold")
 
         # find maxes and mins for binning
-        width_min = min(widths)
-        width_max = max(widths)
-        sym_min = min(symmetry_values)
-        sym_max = max(symmetry_values)
-        rt_min = min(rt_diffs)
-        rt_max = max(rt_diffs)
+        width_min = min(total_data["widths"])
+        width_max = max(total_data["widths"])
+        sym_min = min(total_data["symmetry"])
+        sym_max = max(total_data["symmetry"])
+        rt_min = min(total_data["rt_diffs"])
+        rt_max = max(total_data["rt_diffs"])
 
         # bin
         sym_bins = np.arange(
@@ -295,42 +516,39 @@ class ReportGenerator:
             width_bin
         )
 
-        # genreate figures 
-        fig,axes = plt.subplots(3,2,figsize=(11,8.5))
-        fig.suptitle("QC Metrics Summary",fontsize=14)
+        # genreate histogram figure
+        fig,axes = plt.subplots(3,2,figsize=(8,10))
+        fig.suptitle("Total Run QC",fontsize=14)
         fig.tight_layout(rect=[0,0,1,0.95])
 
-        # summary text
-        fig.text(
-            0.05, 0.95,
-            summary_text,
-            fontsize = 10,
-            va = 'top',
-            ha = 'left',
-            bbox=dict(facecolor = "white", alpha = 0.5)
-        )
-
         # symmetry histogram
+        symmetry_values = total_data["symmetry"]
         axes[0,0].hist(symmetry_values,bins=sym_bins)
         axes[0,0].set_xlim(sym_min,sym_max)
-        axes[0,0].set_title("Bound Symmetry Distribution")
+        axes[0,0].set_title("Bound Symmetry Distribution (Right - Left)")
         axes[0,0].set_xlabel("Bound Symmetry")
-        axes[0,0].set_ylable("Count")
+        axes[0,0].set_ylabel("Count")
         axes[0,0].axvline(
             sym_threshold,
             linestyle="--",
             linewidth=2,
             label="Symmetry Threshold"
         )
+        axes[0,0].axvline(
+            -1*sym_threshold,
+            linestyle="--",
+            linewidth=2,
+            label="Symmetry Threshold"
+        )
         axes[0,0].legend()
-
+        
         # symmetry box and whisker plot
         axes[0,1].boxplot(symmetry_values,vert=True,showfliers=True)
-        axes[0,1].set_title("Bound Symmetry Plot")
+        axes[0,1].set_title("Bound Symmetry Plot (Right - Left)")
         axes[0,1].set_ylabel("Symmetry Value")
-        axes[0,1].legend()
 
         # rt difference histogram
+        rt_diffs = total_data["rt_diffs"]
         axes[1,0].hist(rt_diffs,bins=rt_bins)
         axes[1,0].set_xlim(rt_min,rt_max)
         axes[1,0].set_title("RT Difference Distribution")
@@ -344,20 +562,21 @@ class ReportGenerator:
         )
         axes[1,0].legend()
 
-        # rt difference box and whisker plot
-        axes[1,1].boxplot(widths,vert=True,showfliers=True)
+        # rt diffs box and whisker plot
+        axes[1,1].boxplot(rt_diffs,vert=True,showfliers=True)
         axes[1,1].set_title("RT Difference Plot")
         axes[1,1].set_ylabel("RT Difference")
-        axes[1,1].legend()
+       
 
         # width histogram
-        axes[2,0].hist(rt_diffs,bins=width_bins)
-        axes[2,0].set_xlim(rt_min,rt_max)
+        widths = total_data["widths"]
+        axes[2,0].hist(widths,bins=width_bins)
+        axes[2,0].set_xlim(width_min,width_max)
         axes[2,0].set_title("Width Distribution")
         axes[2,0].set_xlabel("Width (scans)")
         axes[2,0].set_ylabel("Count")
         axes[2,0].axvline(
-            25,
+            width_threshold,
             linestyle="--",
             linewidth=2,
             label="Width Threshold"
@@ -365,48 +584,166 @@ class ReportGenerator:
         axes[2,0].legend()
 
         # width box and whisker plot
+        widths = total_data["widths"]
         axes[2,1].boxplot(widths,vert=True,showfliers=True)
         axes[2,1].set_title("Width Plot")
         axes[2,1].set_ylabel("Width")
-        axes[2,1].legend()
-
+        
         # save figure
+        fig.tight_layout()
         pdf.savefig(fig)
         plt.close(fig)
-        
-    def generate_matrix(self):
+
+    def plot_qc_per_sample(self, pdf, df_qc: pd.DataFrame):
+        """
+        Generates box and whisker plots for per seample metrics, such as average width etc.. and plots them, labelling outliers
+        """
+
+        # metrics to plot
+        metrics = [
+            "flat_top_%",
+            "rt_invalid_%",
+            "sym_valid_%",
+            "avg_width",
+            "err_width",
+            "avg_rt_diff",
+            "err_rt_diff",
+            "avg_symmetry",
+            "err_symmetry"
+        ]
+
+        # generate plot
+        fig,axes = plt.subplots(int(0.5+len(metrics)/3), 3, figsize=(8,10))
+        fig.suptitle("Per Sample QC", fontsize=14)
+
+        # generate figures per metric
+        for idx,metric in enumerate(metrics):
+            
+            # position the figure
+            row = idx // 3
+            col = idx % 3
+            ax = axes[row,col]
+
+            # handle width seperately
+            if metric not in df_qc.columns:
+                raise ValueError(f"Metric {metric} not found in samples dataframe")
+            
+            # handle the rest of the plots
+            else:
+
+                # get y and x values
+                metric_values = df_qc[metric].values
+                samples = df_qc["sample"].tolist()
+
+                # creat subplot
+                bp = ax.boxplot(metric_values, vert=True, showfliers=True)
+                ax.set_title(metric)
+                ax.tick_params(axis='x', which='both', bottom=False, top=False, labelbottom=False)
+
+                # annotate fliers
+                fliers = bp["fliers"][0].get_ydata()
+                for y in fliers:
+                    idx = (metric_values == y).nonzero()[0]
+                    for i in idx:
+                        ax.annotate(
+                            samples[i],
+                            xy=(1,y),
+                            xytext=(1.05,y),
+                            fontsize=8,
+                            va="center"
+                        )
+
+        pdf.savefig(fig)
+        plt.close(fig)
+
+    def generate_matrix(self, molecules: list):
         """
         Takes abundance/area data and stores it in a matrix as well as generating maps for samples and molecules
         matrix is organized with rows = samples and columns = molecules
         method will also reformat peaks dict so that it is simply sample_name: peak area list for each peak
         the molecule and sample maps are used to decode this
+        Params:
+            molecules                       list of molecules to be represented with a row of the matrix
         """
+
         # get peak data and generate maps
         if self.peaks:
             peaks = self.peaks
         else:
             raise ValueError("No peak dict found")
 
+        # generate sample map
         sample_names = list(peaks.keys())
         num_samples = len(sample_names)
         sample_map = {}
         for idx,name in enumerate(sample_names):
             sample_map[name] = idx
-        
         num_peaks = len(peaks[sample_names[0]])
+
+        # generate molecule map
         molecule_map = {}
-        for idx,peak in enumerate(peaks[sample_names[0]]):
-            molecule_map[peak["molecule"]] = idx
+        for idx,molecule in enumerate(molecules):
+            molecule_map[molecule] = idx
 
         # save peak data in a 2d numpy array
         data = np.zeros((num_samples,num_peaks))
 
+        # lists to hold the i,j positions of cells we want to color
+        # red for invalid rt, orange for flat top peaks, yellow for small peaks and blue for extra wide/overloaded peaks
+        red = []
+        yellow = []
+        orange = []
+        blue = []
+        normal = []
+        
+        # iterate over all peaks, store data in matrix and store extra info where needed
         for i,sample in enumerate(sample_names):
             for j,peak in enumerate(peaks[sample]):
-                if peak["rt_valid"]:
-                    data[i,j] = peak['area']
-                else:
+                if not peak["rt_valid"]:
                     data[i,j] = 0
+                    info = {
+                        "coords": (i,j),
+                        "issue": peak["rt_diff"]
+                    }
+                    red.append(info)
+                if peak["flat_top"]:
+                    info ={
+                        "coords": (i,j),
+                        "issue": "flat top"
+                    }
+                    data[i,j] = peak["area"]
+                    orange.append(info)
+                if peak['width_flag'] == "small":
+                    info = {
+                        "coords": (i,j),
+                        "issue": "small peak"
+                    }
+                    data[i,j] = peak["area"]
+                    yellow.append(info)
+                if peak['width_flag'] == "overloaded":
+                    info = {
+                        "coords": (i,j),
+                        "issue": "wide peak"
+                    }
+                    data[i,j] = peak["area"]
+                    blue.append(info)
+                else:
+                    info = {
+                        "coords": (i,j),
+                        "issue": "None"
+                    }
+                    data[i,j] = peak['area']
+                    normal.append(info)
+        
+        # save flags dict for coloring of output files
+        flags = {
+            "red": red,
+            "orange": orange,
+            "yellow": yellow,
+            "blue": blue,
+            "normal": normal
+        }
+        self.output_flags = flags
 
         # save data to object
         self.matrix = data
@@ -419,15 +756,30 @@ class ReportGenerator:
         Params:
             type                    "raw" if only want raw values "norm" if you want normalized, "dual" if you want both
         """
+        # set up dict to inform coloring of cells
+        fills = {
+            "red": PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"),
+            "orange": PatternFill(start_color="FFAA00", end_color="FFAA00", fill_type="solid"),
+            "yellow": PatternFill(start_color="FFEB84", end_color="FFEB84", fill_type="solid"),
+            "blue": PatternFill(start_color="9BC2E6", end_color="9BC2E6", fill_type="solid"),
+        }
+
+        # get config values
         cfg = self.cfg
-        input_dir = cfg.get("input_dir")
-        results_dir = cfg.get_path("results_dir", input_dir)
-        out_file = Path(results_dir) / "results.xlsx"
+        input_dir = Path(cfg.get("input_dir"))
+        name = cfg.get("run_name")
+
+        results = cfg.get("results_dir")
+        results_dir = input_dir / results
+        results_dir.mkdir(parents=True,exist_ok=True)
+
+        out_file = Path(results_dir) / f"{name}.xlsx"
 
         # sort sample and molecule maps to ensure correct ordering
-        samples_ordered = [sample for sample, idx in sorted(self.sample_map.items(), key=lambda x: x[1])]
-        molecules_ordered = [mol for mol, idx in sorted(self.value_map.items(), key=lambda x: x[1])]
-        norm_molecules_ordered = [mol for mol,idx in sorted(self.norm_value_map.items(), key=lambda x: x[1])]
+        samples_ordered = [sample for sample, _ in sorted(self.sample_map.items(), key=lambda x: x[1])]
+        molecules_ordered = [mol for mol, _ in sorted(self.value_map.items(), key=lambda x: x[1])]
+        if self.norm_value_map is not None:
+            norm_molecules_ordered = [mol for mol, _ in sorted(self.norm_value_map.items(), key=lambda x: x[1])]
 
         # generate excel file
         with pd.ExcelWriter(out_file,engine="openpyxl") as writer:
@@ -437,9 +789,38 @@ class ReportGenerator:
                 df_raw = pd.DataFrame(self.matrix, index=samples_ordered, columns=molecules_ordered)
                 df_raw.to_excel(writer, sheet_name="raw", index=True)
 
+                # color the sheet
+                ws = writer.sheets["raw"]
+
+                # genreate legend
+                ws.insert_rows(1,6)
+                ws["A1"] = "Flag Key:"
+                ws["A2"] = "Red = Invalid RT"
+                ws["A3"] = "Orange = Flat-Top Peak"
+                ws["A4"] = "Yellow = Small Peak"
+                ws["A5"] = "Blue = Overloaded/Wide Peak"
+
+                for color, entries in self.output_flags.items():
+                    # skip coloring "normal" peaks
+                    if color not in fills:
+                        continue
+                    
+                    # get fill color
+                    fill = fills[color]
+                    
+                    # color cells
+                    for entry in entries:
+                        i,j = entry["coords"]
+                        
+                        excel_row = i+8
+                        excel_col = j+2
+
+                        ws.cell(row=excel_row, column=excel_col).fill = fill
+
             # get normalized values
             if out_type == "norm" or out_type == "dual":
-                if not self.norm_matrix:
+
+                if self.norm_matrix is None:
                     raise ValueError(f"Normailze matrix before returning normalized data")
                 
                 df_norm = pd.DataFrame(self.norm_matrix, index=samples_ordered, columns=norm_molecules_ordered)
@@ -452,21 +833,22 @@ class ReportGenerator:
             pdf                             pdf file to save figure to
             num_comps                       the number of PCA components to include in plot
         """
+        # raise error if normalized matrix does not exist
+        if self.norm_matrix is None:
+            raise ValueError("No normalized matrix available for PCA")
+
         # get matrix and remove the one-hot encoded groups if needed
         if self.num_groups > 0:
-            group_data = self.data[:, :-self.num_groups:]
-            data = self.data[:,:-self.num_groups]
+            group_data = self.norm_matrix[:, -self.num_groups:]
+            data = self.norm_matrix[:, :-self.num_groups]
         else:
             group_data = None
-            data = self.data
+            data = self.norm_matrix
 
         # grab threshold values
         cfg = self.cfg
         var_threshold = cfg.get("variance_threshold")
         pca_var = cfg.get("pca_var")
-
-        if data == None:
-            raise ValueError("No data matrix found for PCA plotting")
 
         # convert to ppm
         data = (data / data.sum(axis=1,keepdims=True)) * 1e6
@@ -476,7 +858,7 @@ class ReportGenerator:
 
         # filter out low varaince features
         feature_var = data.var(axis=0)
-        keep = feature_var > var_threshold
+        keep = feature_var > float(var_threshold)
         data = data[:,keep]
 
         # z-score transform
@@ -484,8 +866,10 @@ class ReportGenerator:
 
         # calculate PCA and explained variance
         pca = PCA(n_components=num_comps)
+        cg = False
         if group_data is not None:
             data = np.hstack([data,group_data])
+            cg = True
         scores = pca.fit_transform(data)
         variance = pca.explained_variance_ratio_
 
@@ -512,7 +896,7 @@ class ReportGenerator:
         for i in range(num_to_plot - 1):
             for j in range(i+1,num_to_plot):
                 pc_pair = scores[:,[i,j]]
-                self.plot_pca(pc_pair,num_pcx=i+1, num_pcy=j+1, pdf=pdf, color_groups=self.groups)
+                self.plot_pca(pc_pair,num_pcx=i+1, num_pcy=j+1, pdf=pdf, color_groups=cg)
 
     def plot_pca(self, pc_scores, num_pcx: int, num_pcy: int, pdf, color_groups: bool = True, color_molecule: str = None):
         """
@@ -526,33 +910,37 @@ class ReportGenerator:
         """
 
         fig,ax = plt.subplots(figsize=(6,6))
-        fig.tight_layout()
 
         # color samples based on gruoup (explicit, not continuous)
         if color_groups:
 
-            # get group cols
-            all_keys = self.value_map.keys()
-            group_keys = all_keys[-self.num_groups]
-            group_onehot_cols = self.matrix[:,-self.num_groups:]
-            color_groups = np.argmax(group_onehot_cols, axis=1)
+            # get group information
+            group_onehot_cols = self.norm_matrix[:,-self.num_groups:]
+            group_indices = np.argmax(group_onehot_cols, axis=1)
 
-            # map index to group name for legend
+            # get keys to associate with idxs
+            all_keys = list(self.norm_value_map.keys())
+            group_keys = all_keys[-self.num_groups:]
             index_to_group = {i:name for i,name in enumerate(group_keys)}
 
+
             # assign colors to groups
-            unique_groups = sorted(set(color_groups))
+            unique_groups = sorted(set(group_indices))
             colors = plt.cm.tab10.colors
             group_color_map = {g:colors[i%10] for i,g in enumerate(unique_groups)}
 
             # add color to each point and plot
             for g in unique_groups:
-                idx = [i for i,grp in enumerate(color_groups) if grp == g]
-                ax.scatter(pc_scores[idx,0], pc_scores[idx,1], label = index_to_group[g], color = group_color_map[g], alpha=0.8)
-                    
-            ax.set_xlabel(f"PCA {num_pcx}")
-            ax.set_ylabel(f"PCA {num_pcy}")
-            ax.set_title(f"{num_pcy} vs {num_pcx}")
+                idx = np.where(group_indices==g)[0]
+                if len(idx) == 0:
+                    continue
+                ax.scatter(pc_scores[idx,0], pc_scores[idx,1], 
+                           label = index_to_group[g], 
+                           color = group_color_map[g], alpha=0.8)
+
+            ax.set_xlabel(f"PC {num_pcx}")
+            ax.set_ylabel(f"PC {num_pcy}")
+            ax.set_title(f"PC{num_pcy} vs PC{num_pcx}")
             ax.legend()
 
         # color samples based on a specifed value
@@ -561,7 +949,7 @@ class ReportGenerator:
             # get column from matrix that corrosponds to the molecule to color by
             col_idx = self.molecule_map[color_molecule]
             values = self.matrix[:, col_idx]
-            
+
             # normalize and generate color maps
             norm = mcolors.Normalize(vmin=np.min(values), vmax=np.max(values))
             cmap = mcolors.LinearSegmentedColormap.from_list("custom", ["blue","red"])
@@ -581,8 +969,8 @@ class ReportGenerator:
             ax.set_xlabel(f"PC {num_pcx}")
             ax.set_ylabel(f"PC {num_pcy}")
             
-
         # save figure
+        fig.tight_layout()
         pdf.savefig(fig)
         plt.close(fig)
 

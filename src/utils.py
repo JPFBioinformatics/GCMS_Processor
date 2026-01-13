@@ -44,7 +44,7 @@ def generate_template(input_dir: Path, file: Path = "template.xlsx"):
     header2 = "molecule = id of this moleucue, mz = ion to measure, rt = peak retention time case/control = list of sample names in each group (as they appear in input file names)"
 
     df = pd.DataFrame(columns=["molecule","mz","rt","case","control"])
-    df.to_excel(file,index=False,startrow=3,startcol=1)
+    df.to_excel(Path(input_dir) / file, index=False,startrow=3,startcol=1)
 
     wb = load_workbook(file)
     ws = wb.active
@@ -54,3 +54,19 @@ def generate_template(input_dir: Path, file: Path = "template.xlsx"):
 
     wb.save(file)
 
+def log_timestamp(input_dir: Path, label: str, ts: datetime):
+    """
+    logs the timestamp of an operation
+    Params:
+        input_dir                       iput directory where we will be storing the results of the ts log
+        label                           label for this part of the ts log
+        ts                              datetime object of the timestamp for this operation
+    """
+    log_file = Path(input_dir) / "timestamp_log.jsonl"
+
+    data = {
+        label: ts.isoformat()
+    }
+
+    with open(log_file, "a") as f:
+        f.write(json.dumps(data) + "\n")

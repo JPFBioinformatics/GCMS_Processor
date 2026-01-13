@@ -36,7 +36,8 @@ class MzMLProcessor:
         # load config
         cfg = self.cfg
         input_dir = Path(cfg.get("input_dir"))
-        mzml_dir = input_dir / cfg.get("mzml_dir")
+        results = Path(cfg.get("results_dir"))
+        mzml_dir = input_dir / results / cfg.get("mzml_dir")
 
         # check to see if mzml files are already converted
         mzml_files = list(mzml_dir.glob("*.mzML"))
@@ -64,7 +65,7 @@ class MzMLProcessor:
             mzml_dir.mkdir(parents=True,exist_ok=True)
 
             # get log_dir
-            log_dir = input_dir
+            log_dir = input_dir / results
 
             # run each msconvert and log results
             for sample in samples_in:
@@ -119,52 +120,31 @@ class MzMLProcessor:
             binned_matrix                   intensity matrix that has been binned
         """
         
-        # create a list to hold binned_mz values
-        binned_mzs = []
+        # change unique mz list to array
+        mz_array = np.asarray(unique_mzs)
 
-        # determine int bin values such that n is added to binned_mzs if n-0.3 < mz <= n+0.7
-        for mz in unique_mzs:
+        # get bin assignments
+        bin_assignments = (mz_array + 0.3).astype(int)
 
-            binned_mass = int(mz+0.3)
-            
-            if binned_mass not in binned_mzs:
-                binned_mzs.append(binned_mass)
-
-        # dictionary that will hold the binned_mz : indices of unique_mzs to bin
-        bin_tracker = {}
-
-        # intialize bin_tracker with empty lists for each binned_mz value
-        for mz in binned_mzs:
-            bin_tracker[mz] = []
+        # get unique bins and inverse
+        binned_mzs, inverse = np.unique(bin_assignments, return_inverse = True)
         
-        # iterate over unique_mzs
-        for idx, unique_mz in enumerate(unique_mzs):
-            # find correct bin for unique_mz value and add the index of that value to bin_tracker
-            for binned_mz in binned_mzs:
-                if (binned_mz - 0.3) < unique_mz <= (binned_mz + 0.7):
-                    bin_tracker[binned_mz].append(idx)
+        # prepare output matrix (rows = bins cols = time points)
+        num_bins = len(binned_mzs)
+        _, num_cols = intensity_matrix.shape
+        binned_matrix = np.zeros((num_bins,num_cols), dtype = intensity_matrix.dtype)
 
-        _ , num_cols = np.shape(intensity_matrix)
+        # bin masses using inverse to map each origional mz to its bin
+        for src_row, bin_row in enumerate(inverse):
+            binned_matrix[bin_row] += intensity_matrix[src_row]
 
-        # create a new intensity matrix to hold binned values using the same number of columns but now with rows corrsponding to binned_mzs instead of unique_mzs
-        binned_matrix = np.zeros((len(binned_mzs), int(num_cols)))
-
-        # iterate over bin_tracker and sum rows of intesity_matrix as directed
-        for row_idx, (binned_mz, indices_to_bin) in enumerate(bin_tracker.items()):
-
-            # sum intensiteis of intensity_matrix for each time point
-            summed_intensity = np.sum(intensity_matrix[indices_to_bin], axis=0)
-
-            # add summed intensities to new matrix
-            binned_matrix[row_idx] = summed_intensity
-
-        return(binned_mzs, binned_matrix)
+        return list(binned_mzs), binned_matrix 
 
     @staticmethod
-    def create_intensity_matrix(mzml_path):
+    def create_scan_matrix(mzml_path):
         """
-        Extracts spectra metadata (scan start time, scan number, TIC value) and builds a matrix where each spectrum is
-        represented by a column and each unique m/z is represented by a row
+        Extracts spectra metadata and builds a matrix where each spectrum is
+        represented by a column and each unique m/z is represented by a row from a SCAN file
         Params:
             mzml_path                   path to the mzml file to process
         Returns:
@@ -177,7 +157,7 @@ class MzMLProcessor:
             '': 'http://psi.hupo.org/ms/mzml'
         }
 
-        spectra_metadata = []
+        spectra_metadata = {}
         intensity_list = []
         unique_mzs = set()
 
@@ -206,11 +186,7 @@ class MzMLProcessor:
                 continue
 
             # Save metadata for the spectrum in the list
-            metadata = {
-                'scan_id': scan_id,
-                'scan_start_time': scan_start_time,
-            }
-            spectra_metadata.append(metadata)
+            spectra_metadata[int(scan_id)-1] = float(scan_start_time)
 
             # Grabs the binary encoded m/z and intensity arrays
             mz_array_encoded = binary_data_elements[0].text
@@ -258,4 +234,151 @@ class MzMLProcessor:
         output_matrix = IntensityMatrix(intensity_matrix=final_matrix,unique_mzs=binned_mzs,spectra_name=name,spectra_metadata=spectra_metadata)
 
         return output_matrix
-         
+    
+    @staticmethod
+    def create_sim_matrix(mzml_path):
+        """
+        Extracts spectra metadata and builds a matrix where each spectrum is
+        represented by a column and each unique m/z is represented by a row, from a SIM file
+        Params:
+            mzml_path                   path to the mzml file to process
+        Returns:
+            output_matrix               intensitymatrix object based on input mzml file
+        """
+        tree = ET.parse(mzml_path)
+        root = tree.getroot()
+
+        namespaces = {
+            '': 'http://psi.hupo.org/ms/mzml'
+        }
+
+        time_map = {}
+        ion_map = {}
+
+        # get name of sample
+        file_name = mzml_path.stem
+
+        # generate empty matrix for data storage
+        chrom_list = root.find('.//chromatogramList', namespaces)
+        num_chroms = int(chrom_list.get('count'))
+        first_chrom = chrom_list.find('chromatogram',namespaces)
+        num_time_points = int(first_chrom.get('defaultArrayLength'))
+        matrix = np.zeros((num_chroms,num_time_points))
+
+        int_count = 0
+        time_count = 0
+
+        # iterate over chroms and gather data
+        for idx,chrom in enumerate(chrom_list):
+
+            # get ion and add to map
+            iso = chrom.find(
+                './/precursor/isolationWindow/cvParam[@accession="MS:1000827"]',
+                namespaces
+            )
+            # handle TIC ion value
+            if iso is None:
+                ion = 9999
+                ion_map[ion] = num_chroms-1
+            else:
+                ion = int(0.3+float(iso.attrib["value"]))
+                ion_map[ion] = int(idx)-1
+
+            # now parse the binary data arrays, getting the time and intensity arrays
+            for bda in chrom.findall('.//binaryDataArray', namespaces):
+                cvparams = [child for child in list(bda) if child.tag.endswith('cvParam')]
+
+                # handle cv blocks
+                array_type = None
+                dtype = None
+                for cv in cvparams:
+                    acc = cv.attrib.get('accession')
+                    if acc == "MS:1000523":
+                        dtype = np.float64
+                    elif acc == "MS:1000521": 
+                        dtype = np.float32
+                    if acc == "MS:1000515":
+                        array_type = "intensity_array"
+                        int_count += 1
+                    elif acc == "MS:1000595":
+                        array_type = "time_array"
+                        time_count += 1
+                    elif acc == "MS:1000786":
+                        array_type = "nonstandard"
+                
+                # grab encoded data
+                if array_type == "time_array" or array_type == "intensity_array":
+                    encoded = bda.find('binary', namespaces).text
+                    decoded = MzMLProcessor.decode_binary_data(encoded,dtype)
+
+                    # generate time_map (col_idx: time)
+                    if array_type == "time_array" and idx == 1:
+                        for i,time in enumerate(decoded):
+                            time_map[i] = float(time)
+
+                    # add intensity data to array
+                    elif array_type == "intensity_array":
+                        if idx != 0:
+                            matrix[idx-1] = decoded
+                        # add TIC to the end of the matrix
+                        else:
+                            matrix[-1] = decoded
+
+        # convert ion map to sorted list
+        mzs = [ion for ion,idx in sorted(ion_map.items(), key=lambda x: x[1])]
+
+        # create intensity matrix object and return
+        output_matrix = IntensityMatrix(intensity_matrix=matrix,unique_mzs=mzs,spectra_name=file_name,spectra_metadata=time_map)
+        return output_matrix
+    
+    @staticmethod
+    def create_intensity_matrix(mzml_path):
+        """
+        Generatews intensity matrix from mzml object, automatically detecting if it is SCAN or SIM
+        Params:
+            mzml_path                       Path to mzml object to analyze
+        """
+
+        # get aquisition type (SCAN or SIM)
+        aq_type = MzMLProcessor.aq_type(mzml_path)
+
+        if aq_type == "SIM":
+            matrix = MzMLProcessor.create_sim_matrix(mzml_path)
+        elif aq_type == "SCAN":
+            matrix = MzMLProcessor.create_scan_matrix(mzml_path)
+
+        return matrix
+
+    @staticmethod
+    def aq_type(mzml_path: Path):
+        """
+        Determines if the mzML file supplied is from a SIM or SCAN run
+        Params:
+            mzml_path                       Path to the mzML object to be analyzed
+        """
+
+        tree = ET.parse(mzml_path)
+        root = tree.getroot()
+
+        namespaces = {
+            '': 'http://psi.hupo.org/ms/mzml'
+        }
+
+        # get filecontent information
+        try:
+            content = root.find('.//fileDescription/fileContent',namespaces)
+        except Exception as e:
+            raise ValueError(f"No file content found at {mzml_path}\nError:\n{e}")
+
+        # get cvParams
+        cvparams = [child for child in list(content) if child.tag.endswith('cvParam')]
+
+        # iterate and save accession values
+        for cv in cvparams:
+            acc = cv.attrib.get("accession")
+            if acc == "MS:1001472":
+                return "SIM"
+            elif acc == "MS:1000579":
+                return "SCAN"
+                
+

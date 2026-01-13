@@ -23,7 +23,7 @@ def main():
     # load configs
     cfg = ConfigLoader(root_dir / "config.yaml")
     molecules,mzs,rts = cfg.load_collection_info()
-    
+
     # convert .d files to mzML and pull intensity matrix objects
     processor = mp(cfg)
     matrices = processor.full_bulk_convert()
@@ -31,12 +31,13 @@ def main():
     # collect data
     output = im.collect_data(matrices,molecules,mzs,rts)
     
-    # generate report
-    report = rg(output)
+    # create report generator object
+    report = rg(cfg,output)
     # generate data matrix
-    report.generate_matrix()
+    report.generate_matrix(molecules)
     # write to excel file
     report.write_to_excel("raw")
+    print("Excel report written")
 
 if __name__ ==  "__main__":
     main()

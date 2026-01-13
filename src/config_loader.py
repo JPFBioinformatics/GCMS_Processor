@@ -111,8 +111,6 @@ class ConfigLoader:
             molecules                   list of molecules
             mzs                         list of m/z ions 
             rts                         list of retention times
-            case                        list of samples in experimental case group (optional)
-            control                     list of samples in control group (optional)
             all return values are matched by index, so the first molecule is idx 0 in all 3 lists
         """
 

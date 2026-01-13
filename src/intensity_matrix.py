@@ -70,7 +70,7 @@ class IntensityMatrix:
         if value is not None:
             if not len(value) == self.intensity_matrix.shape[1]:
                 raise ValueError('Spectra metadata length does not match intensity array column count')
-            if not isinstance(value, list):
+            if not isinstance(value, dict):
                 raise ValueError('Spectra metadata is not a list')
         self._spectra_metadata = value
     #endregion
@@ -196,6 +196,8 @@ class IntensityMatrix:
 
             # filters out any rows that "cross" the average intensity 6 or fewer times
             for row in removed_zeros:
+                if row.size == 0:
+                    continue
                 avg = np.mean(row)
                 crossings = self.count_crossings(row,avg)
 
@@ -209,22 +211,14 @@ class IntensityMatrix:
 
         # iterate through each segment
         for segment in segments:
-            # stores the median deviation for current segment
-            segment_nfs = []
-
             # iterate through all rows of the segment
             for row in segment:
                 # calculate noise factor for current row
                 current_nf = self.calculate_row_nf(row)
-                # append result to median_devs list
-                segment_nfs.append(current_nf)
+                # append result
+                noise_factors.append(current_nf)
 
-            # adds the segment noise factors to the master list
-            noise_factors.append(segment_nfs)
-
-            self.noise_factor = np.median(noise_factors)
-
-            return f"Noise Factor calculated: Nf = {self.noise_factor}"
+        self.noise_factor = np.median(noise_factors)
     
     # counts the number of times the values of an array "cross" a given average value
     def count_crossings(self,row,avg):
@@ -291,38 +285,38 @@ class IntensityMatrix:
         maxima = []
 
         # go through each maxima in list, find its deconvolution window and check if sinal is high enough to be included
-        for max in max_idxs:
+        for peak_max in max_idxs:
 
             # find the left bound of the deconvolution window
-            left_bound = self.find_bound(array,max,-1)
+            left_bound_scan = self.find_bound(array,peak_max,-1)
             # find the right bound of the deconvolution window
-            right_bound = self.find_bound(array,max,1)
+            right_bound_scan = self.find_bound(array,peak_max,1)
             
             # width filter, skip peak if peak has less than 3 scans on either side of the peak
-            if right_bound - max < 3 or max - left_bound < 3:
+            if right_bound_scan - peak_max < 3 or peak_max - left_bound_scan < 3:
                 continue
             
             # calculate baseline
-            baseline = self.tentative_baseline(left_bound, right_bound, array)
+            baseline = self.tentative_baseline(left_bound_scan, right_bound_scan, array)
 
             # calcluate quadratic fit for peak
-            fit = self.quadratic_fit(array,max)
+            fit = self.quadratic_fit(array,peak_max)
 
             # grab the precise location and height of the peak
             precise_max_location = fit['x_values'][1]
-            precise_max_height = fit['y_values'][1] - (baseline['slope']*(precise_max_location - baseline['left_bound']) + baseline['y_int'])
+            precise_max_height = fit['y_values'][1] - (baseline['slope']*precise_max_location + baseline['y_int'])
             precise_max_abundance = fit['y_values'][1]
             
             # finds the bin (0.1 of a scan) that the precise max is located within by truncating at 1 decimal point
             max_bin = int(precise_max_location*10) / 10
 
             # calculate convolution value for this peak
-            conv = self.convolution_value(array,max)
+            conv = self.convolution_value(array,peak_max)
             
             max_info = {
-                'left_bound' : left_bound,
-                'right_bound' : right_bound,
-                'center' : max,
+                'left_bound' : left_bound_scan,
+                'right_bound' : right_bound_scan,
+                'center' : peak_max,
                 'precise_max_location' : precise_max_location,
                 'precise_max_height' : precise_max_height,
                 'max_abundance' : precise_max_abundance,
@@ -333,7 +327,8 @@ class IntensityMatrix:
             }
 
             # add width flag
-            width = right_bound = left_bound
+            width = right_bound_scan - left_bound_scan
+            max_info["width"] = width
             if width < 5:
                 max_info["width_flag"] = "small"
             elif width < 10:
@@ -350,7 +345,7 @@ class IntensityMatrix:
                 max_info["flat_top"] = False
 
             # accept peak if it passes threshold check
-            if self.threshold_check(array,max,precise_max_height):
+            if self.threshold_check(array,peak_max,precise_max_height):
                 maxima.append(max_info)
 
         # returns list of dictionary entries containing maxima information
@@ -380,7 +375,7 @@ class IntensityMatrix:
             if pos < 0:
                 pos = 0
             elif pos >= n:
-                pos = n
+                pos = n-1
 
             return pos
 
@@ -401,6 +396,7 @@ class IntensityMatrix:
             # if the value at this step is less than frac of max close window here
             if value < frac * max_value:
                 return center + counter
+                
             
             # if the value at this step is more than 5 nf greater than the minimum close the window at the previous step
             if value > 5 * nf + min_value:
@@ -415,17 +411,19 @@ class IntensityMatrix:
         if pos < 0:
             pos = 0
         elif pos >= n:
-            pos = n
+            pos = n-1
 
         return pos
 
     # finds a quadratic fit for a set of 3 points in an array
     def quadratic_fit(self, array, center):
 
-        # x values for fit, the center index and its two direct neighbors
-        x_points = np.array([center-1, center, center+1])
+        # get map to convert scans to minutes
+        scan_map = self.spectra_metadata
+        # x values for fit, the center index and its two direct neighbors (in minutes)
+        x_points = np.array([scan_map[center-1], scan_map[center], scan_map[center+1]])
         # y values for fit, from row corrosponding to x values
-        y_points = array[x_points]
+        y_points = array[[center-1,center,center+1]]
 
         # perform quadratic numpy polyfit, returning coefficients in a,b,c for ax^2 + bx + c form
         coeffs = np.polyfit(x_points, y_points, 2)
@@ -479,22 +477,29 @@ class IntensityMatrix:
 
     # region Baseline Calculation
 
-    # calculates a tentative baseline for a percieved component
+    # calculates a tentative baseline for a percieved component (minutes not scans)
     def tentative_baseline(self,left_bound,right_bound,array):
 
-        # create componenet array 
+        # get scan to minute map and generate the left and right times
+        scan_map = self.spectra_metadata
+        s = max(scan_map.keys())
+        l = min(scan_map.keys())
+
+        # create componenet array
         component_array = array[left_bound:right_bound+1]
 
-        # return no baseline if the peak is all flat top
-        peak_range = component_array.max() - component_array.min()
-        if peak_range == 0:
-            return None
-        
-        # creates an x-values array to use later for baseline computing, each x value is just an index value for input array
-        x = np.arange(len(component_array))
+        # creates an x-values array to use later for baseline computing (in min, not scans)
+        try:
+            x = np.array([scan_map[i] for i in range(left_bound,right_bound+1)], dtype=float)
+        except Exception:
+            print(f"Max key: {s}\n Min key: {l}")
+            print(f"Left Bound: {left_bound}    Right Bound: {right_bound}")
 
         # get the index of the peak maximum
         max_idx = np.argmax(component_array)
+        # if peak is flat top then assign the max to the midpoint
+        if max_idx == 0 or max_idx == (right_bound - left_bound):
+            max_idx = (right_bound - left_bound) // 2 
         
         # get the index values of the minimum on the left and on the right of the max
         left_idx = np.argmin(component_array[:max_idx])
@@ -552,7 +557,15 @@ class IntensityMatrix:
 
         except Exception as e:
             print(f"Error locating ion chromatogram for ion: {mz}\n{e}")
-
+            print(f"Unique mzs:\n {self.unique_mzs}")
+            return None
+        
+        # if no peaks are found then 
+        if len(peaks) == 0:
+            print(self.peak_list[row_idx])
+            self.plot_ic(mz)
+            return None
+        
         # find the peak closest to specified RT
         try:
             closest_peak = min(
@@ -561,6 +574,7 @@ class IntensityMatrix:
             )
         except Exception as e:
             print(f"No peaks availbe in ion chromatogram for ion: {mz}\n{e}")
+            print(len(peaks))
 
         # check if peak is close enough to supplied RT
         diff = abs(closest_peak['precise_max_location'] - rt)
@@ -582,6 +596,9 @@ class IntensityMatrix:
         if peak["flat_top"]:
             peak["area"] = 0
             return None
+        # check if peak is out of bounds for valid RT, if so then do not integrate
+        if not peak["rt_valid"]:
+            peak["area"] = 0
 
         # get symmetry threshold
         cfg = self.cfg
@@ -610,7 +627,7 @@ class IntensityMatrix:
         # calculate the diff between endpoints
         symmetry = left_diff - right_diff
         peak["bound_symmetry"] = symmetry
-        if symmetry > end_threshold:
+        if abs(symmetry) > end_threshold:
             peak["symmetry_valid"] = False
         else:
             peak["symmetry_valid"] = True
@@ -627,13 +644,12 @@ class IntensityMatrix:
         peak["area"] = peak_area
     
     @staticmethod
-    def collect_data(matrices: list, molecules: list, mzs: list, rts: list, type: str = "raw"):
+    def collect_data(matrices: list, molecules: list, mzs: list, rts: list):
         """
         Collects all peaks from a given list of matrices that corrospond to molecule/mz/rt gropuing specified
         Params:
             matrices                            list of IntensityMatrix objects to parse
             molecules,mzs,rts                   lists (index matched) of moleucle,mz,rt triplets
-            type                                type of data to collect "raw" or "normalized"
         Returns:
             output                              dict of sample_name: peak list values
         """
@@ -644,6 +660,8 @@ class IntensityMatrix:
             peaks = []
 
             for idx,molecule in enumerate(molecules):
+                if np.isnan(matrix.noise_factor):
+                    print(f"Spectra {matrix.spectra_name} NF error\nNF: {matrix.noise_factor}")
                 peak = matrix.closest_peak(mzs[idx],rts[idx])
                 peak["molecule"] = molecule
                 matrix.integrate_peak(peak)
@@ -680,6 +698,20 @@ class IntensityMatrix:
         plt.ylabel("Count")
         plt.title("Peak Width Distribution")
         plt.tight_layout()
+        plt.show()
+
+    def plot_ic(self, mz: int):
+        """
+        Plots a given m/z ion chromatogram for visualization
+        """
+        print(f"Noise Factor: {self.noise_factor}")
+        row_idx = self.unique_mzs.index(mz)
+        row = self.intensity_matrix[row_idx]
+
+        plt.plot(row)
+        plt.xlabel("Index")
+        plt.ylabel("Abundance")
+        plt.title(f"{mz} Ion Chromatogram")
         plt.show()
 
     # endregion
