@@ -517,19 +517,27 @@ class IntensityMatrix:
         baseline_array = m * x + b
 
         # shfit baseline down if any of its values are greater than the value of input array at same index
+        diffs = []
         for idx, element in enumerate(baseline_array):
             if element > component_array[idx]:
                 diff = element - component_array[idx]
-                baseline_array -= diff
+                diffs.append(diff)
 
+        # handle y-int/baseline array correction (shifting up/down)
+        if len(diffs) > 0:
+            y_correct = max(diffs)
+            baseline_array -= y_correct
+        else:
+            y_correct = 0
+
+        # save and return values
         output = {
             'baseline_array' : baseline_array,
             'slope': m,
-            'y_int': b,
+            'y_int': b-y_correct,
             'left_bound': left_bound,
             'right_bound': right_bound
         }
-
         return output
 
     # endregion
