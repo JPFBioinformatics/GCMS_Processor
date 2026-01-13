@@ -818,7 +818,7 @@ class ReportGenerator:
                 if self.norm_matrix is None:
                     raise ValueError(f"Normailze matrix before returning normalized data")
                 
-                df_norm = pd.DataFrame(self.norm_matrix, index=samples_ordered, columns=norm_molecules_ordered)
+                df_norm = pd.DataFrame(self.norm_matrix[:,:-self.num_groups], index=samples_ordered, columns=norm_molecules_ordered)
                 df_norm.to_excel(writer, sheet_name="normalized", index=True)
 
     def pca_plots(self, pdf, num_comps: int = 2):
