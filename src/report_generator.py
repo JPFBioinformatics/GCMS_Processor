@@ -102,10 +102,6 @@ class ReportGenerator:
         # sort deletion indices
         standard_idxs = sorted(standard_idxs)
 
-        print(f"Standards:")
-        for i in standard_idxs:
-            print(f"{i}\n")
-
         # adjust samples to intenal standard
         if standards:
             std_map = {}
@@ -114,12 +110,13 @@ class ReportGenerator:
                 if std_name not in norm_value_map.keys():
                     raise ValueError(f"Standard {std_name} not found in collected values")
                 std_map[molecules[std_idx]] = std_name
-            print(f"\nStandard Map:\n{std_map}\n")
+
             # divide values as specified by std_map
             for mol,std in std_map.items():
-                mol_i = norm_value_map[mol]
-                std_i = norm_value_map[std]
-                norm_matrix[:,mol_i] = norm_matrix[:,mol_i] / norm_matrix[:,std_i]
+                if mol not in set(standards):
+                    mol_i = norm_value_map[mol]
+                    std_i = norm_value_map[std]
+                    norm_matrix[:,mol_i] = norm_matrix[:,mol_i] / norm_matrix[:,std_i]
 
             # capture column order before removing standard cols
             ordered_cols = [
@@ -135,8 +132,6 @@ class ReportGenerator:
                 if name not in stds:
                     final_map[name] = new_idx
                     new_idx += 1
-            print(f"Norm Matrix Dims: {norm_matrix.shape}")
-            print(f"Number of values in final map: {len(final_map)}")
 
         # adjust data to normalization factor
         if norm_factors:
