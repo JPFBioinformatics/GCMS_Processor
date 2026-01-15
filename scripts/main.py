@@ -11,7 +11,7 @@ from src.config_loader import ConfigLoader
 from src.intensity_matrix import IntensityMatrix as im
 from src.mzml_processor import MzMLProcessor as mp
 from src.report_generator import ReportGenerator as rg
-from src.utils import log_timestamp
+from src.utils import log_timestamp,delete_file,delete_directory
 
 # endregion
 
@@ -26,6 +26,13 @@ def main():
     log_dir = indir / results
     log_dir.mkdir(parents=True,exist_ok=True)
     molecules,mzs,rts = cfg.load_collection_info()
+
+    # delete old log files if you're rerunning the analysis
+    log_file = log_dir / "timestamp_log.jsonl"
+    sub_log = log_dir / "subprocess_log.jsonl"
+    files = [log_file,sub_log]
+    for file in files:
+        delete_file(file)
 
     # log start time
     log_timestamp(log_dir,"start",start_ts)
@@ -44,7 +51,7 @@ def main():
     log_timestamp(log_dir,"raw_data_collection",ts2)
     print("Raw Data Collected")
 
-    # generate report
+    # generate report object
     report = rg(cfg,output)
     # generate data matrix
     report.generate_matrix(molecules)
@@ -70,11 +77,17 @@ def main():
     log_timestamp(log_dir,"report_generated",ts6)
     print("Report Generated")
 
+    # delete mzML files for 
+    flag = cfg.get("keep_mzml")
+    if flag == True:
+        mzml = cfg.get("mzml_dir")
+        mzml_dir = log_dir / mzml
+        delete_directory(mzml_dir)
+
     # log end time
     end_ts = datetime.datetime.now()
     log_timestamp(log_dir,"end",end_ts)
     print("End TS Logged")
-
 
 if __name__ ==  "__main__":
     main()

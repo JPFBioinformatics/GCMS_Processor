@@ -1,4 +1,4 @@
-import subprocess,json
+import subprocess,json,shutil
 from datetime import datetime
 from pathlib import Path
 from openpyxl import load_workbook
@@ -70,3 +70,25 @@ def log_timestamp(input_dir: Path, label: str, ts: datetime):
 
     with open(log_file, "a") as f:
         f.write(json.dumps(data) + "\n")
+
+def delete_file(file: Path):
+        """ 
+        Deletes a specifed file
+        Params:
+            file                Path to the file to be deleted
+        """
+        if file.exists():
+            file.unlink()
+
+def delete_directory(dir_path: Path):
+    """
+    Deletes a specifed directory and all incldued files
+    Params:
+       dir_path                 Path to the directory to delete
+    """
+    try:
+        shutil.rmtree(dir_path)
+    except FileNotFoundError as e:
+        print(f"File:\n{dir_path}\nnot found\nError:\n{e}")
+    except PermissionError as p:
+        print(f"Permission error deleting:\n{dir_path}\nError:\n{p}")

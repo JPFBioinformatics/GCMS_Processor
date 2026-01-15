@@ -7,7 +7,7 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from collections import Counter
 from openpyxl import load_workbook
-from openpyxl.styles import PatternFill
+from openpyxl.styles import PatternFill,Font
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -44,6 +44,7 @@ class ReportGenerator:
         self.norm_value_map = None
         self.norm_standards = None
         self.output_flags = None
+        self.outliers = None
 
     def save_peaks(self, peaks: dict):
         """
@@ -339,13 +340,14 @@ class ReportGenerator:
             flags_dict                      dict that contains flag info for calculation
         """
 
+        # calcualte other metrics
         num_peaks = len(flags_dict["width_flag"])
         flat_top_pct = 100 * sum(flags_dict["flat_top"]) / num_peaks
         width_counts = Counter(flags_dict["width_flag"])
         width_pct = {k: 100*v/num_peaks for k,v in width_counts.items()}
         avg_width = np.mean(flags_dict["widths"])
         err_width = np.std(flags_dict["widths"]) / np.sqrt(num_peaks)
-        rt_invalid_pct = 100 * (sum(flags_dict["rt_valid"]) / num_peaks)
+        rt_valid_pct = 100 * (sum(flags_dict["rt_valid"]) / num_peaks)
         avg_rt = np.mean(flags_dict["rt_diffs"])
         err_rt = np.std(flags_dict["rt_diffs"]) / np.sqrt(num_peaks)
         sym_valid_pct = 100 * (1 - np.mean(flags_dict["sym_valid"]))
@@ -353,19 +355,19 @@ class ReportGenerator:
         err_sym = np.std(flags_dict["symmetry"]) / np.sqrt(num_peaks)
 
         return {
-            "flat_top_%": flat_top_pct,
-            "width_small_%": width_pct.get("small",0),
-            "width_ideal_%": width_pct.get("ideal",0),
-            "width_normal_%": width_pct.get("normal",0),
-            "width_overloaded_%": width_pct.get("overloaded",0),
-            "avg_width": avg_width,
-            "err_width": err_width,
-            "rt_invalid_%": rt_invalid_pct,
-            "avg_rt_diff": avg_rt,
-            "err_rt_diff": err_rt,
-            "sym_valid_%": sym_valid_pct,
-            "avg_symmetry": avg_sym,
-            "err_symmetry": err_sym
+            r"% FlatTop": flat_top_pct,
+            "% Narrow": width_pct.get("small",0),
+            "% Ideal": width_pct.get("ideal",0),
+            "% Normal": width_pct.get("normal",0),
+            "% Overloaded": width_pct.get("overloaded",0),
+            "\u03BC Width": avg_width,
+            "\u03C3 Width": err_width,
+            "% RT Valid": rt_valid_pct,
+            "\u03BC \u0394RT": avg_rt,
+            "\u03C3 \u0394RT": err_rt,
+            "% Valid Sym": sym_valid_pct,
+            "\u03BC Sym": avg_sym,
+            "\u03C3 Sym": err_sym
             }
     
     def add_sample_map_page(self, pdf):
@@ -413,15 +415,28 @@ class ReportGenerator:
             total_data                      same as sample_data but summed for the entire run, not per sample
         """
 
+        # calculate per-sample outliers
+        self.flag_outliers()
+        outliers = self.outliers
+        row_idxs = np.array([r for r,_ in outliers])
+        num_samples = self.matrix.shape[0]
+        num_mols = self.matrix.shape[1]
+        counts = np.zeros(num_samples, dtype=int)
+
+        # count instances of outliers in each row
+        for r in row_idxs:
+            counts[r] += 1
+        percent_counts = 100 * counts / num_mols
+
         # add sample map page
         self.add_sample_map_page(pdf)
 
         # compute stats per sample
         rows = []
         for sample,data in sample_data.items():
-            name = sample
             row = self.compute_stats(data)
-            row["sample"] = self.sample_map[name]
+            row["# Outliers"] = percent_counts[self.sample_map[sample]]
+            row["sample"] = self.sample_map[sample]
             rows.append(row)
 
         # compute stats for total
@@ -431,10 +446,23 @@ class ReportGenerator:
 
         # create df
         df_qc = pd.DataFrame(rows)
-        df_qc = df_qc[["sample","flat_top_%","width_small_%","width_ideal_%","width_normal_%","width_overloaded_%",
-                   "avg_width","err_width","rt_invalid_%","avg_rt_diff","err_rt_diff",
-                   "sym_valid_%","avg_symmetry","err_symmetry"]]
-
+        df_qc = df_qc[[
+            "sample",
+            r"% FlatTop",
+            "% Narrow",
+            "% Ideal",
+            "% Normal",
+            "% Overloaded",
+            "\u03BC Width",
+            "\u03C3 Width",
+            "% RT Valid",
+            "\u03BC \u0394RT",
+            "\u03C3 \u0394RT",
+            "% Valid Sym",
+            "\u03BC Sym",
+            "\u03C3 Sym",
+            "# Outliers"
+        ]]
         # add table to QC PDF
         num_pages = math.ceil(len(df_qc) / rows_per_page)
         for page in range(num_pages):
@@ -451,7 +479,7 @@ class ReportGenerator:
                     continue
 
             # generate figure
-            fig,ax = plt.subplots(figsize=(8,10))
+            fig,ax = plt.subplots(figsize=(8.5,11))
             fig.tight_layout()
             ax.axis("off")
 
@@ -463,10 +491,22 @@ class ReportGenerator:
                 cellLoc = "center"
             )
 
-            # set fonts/scale
+            # basic table settings
             table.auto_set_font_size(False)
             table.set_fontsize(8)
-            table.scale(1.0,1.2)
+            table.scale(1.0,1.5)
+            
+            # format column titles for readability
+            for key,cell in table.get_celld().items():
+                row,col = key
+                if row == 0:
+                    cell.visible_edges = "LR"
+                    text = cell.get_text()
+                    text.set_rotation(45)
+                    text.set_verticalalignment("bottom")
+                    text.set_fontsize(8)
+                    text.set_fontweight("bold")
+                    text.set_x(0.25)
 
             # add title
             title = "QC Summary Table"
@@ -596,27 +636,28 @@ class ReportGenerator:
 
         # metrics to plot
         metrics = [
-            "flat_top_%",
-            "rt_invalid_%",
-            "sym_valid_%",
-            "avg_width",
-            "err_width",
-            "avg_rt_diff",
-            "err_rt_diff",
-            "avg_symmetry",
-            "err_symmetry"
+            r"% FlatTop",
+            "% RT Valid",
+            "% Valid Sym",
+            "# Outliers",
+            "\u03BC Width",
+            "\u03C3 Width",
+            "\u03BC \u0394RT",
+            "\u03C3 \u0394RT",
+            "\u03BC Sym",
+            "\u03C3 Sym",
         ]
 
         # generate plot
-        fig,axes = plt.subplots(int(0.5+len(metrics)/3), 3, figsize=(8,10))
+        fig,axes = plt.subplots(5, 2, figsize=(8,10))
         fig.suptitle("Per Sample QC", fontsize=14)
 
         # generate figures per metric
         for idx,metric in enumerate(metrics):
             
             # position the figure
-            row = idx // 3
-            col = idx % 3
+            row = idx // 2
+            col = idx % 2
             ax = axes[row,col]
 
             # handle width seperately
@@ -629,6 +670,10 @@ class ReportGenerator:
                 # get y and x values
                 metric_values = df_qc[metric].values
                 samples = df_qc["sample"].tolist()
+
+                # handle metrics with no data (happens with # Outliers as well as others)
+                if len(metric_values) == 0:
+                    metric_values = [0]
 
                 # creat subplot
                 bp = ax.boxplot(metric_values, vert=True, showfliers=True)
@@ -644,7 +689,7 @@ class ReportGenerator:
                             samples[i],
                             xy=(1,y),
                             xytext=(1.05,y),
-                            fontsize=8,
+                            fontsize=5,
                             va="center"
                         )
 
@@ -775,6 +820,8 @@ class ReportGenerator:
         molecules_ordered = [mol for mol, _ in sorted(self.value_map.items(), key=lambda x: x[1])]
         if self.norm_value_map is not None:
             norm_molecules_ordered = [mol for mol, _ in sorted(self.norm_value_map.items(), key=lambda x: x[1])]
+        # remove group columns
+        norm_molecules_ordered = norm_molecules_ordered[:-self.num_groups]
 
         # generate excel file
         with pd.ExcelWriter(out_file,engine="openpyxl") as writer:
@@ -788,12 +835,13 @@ class ReportGenerator:
                 ws = writer.sheets["raw"]
 
                 # genreate legend
-                ws.insert_rows(1,6)
+                ws.insert_rows(1,7)
                 ws["A1"] = "Flag Key:"
                 ws["A2"] = "Red = Invalid RT"
                 ws["A3"] = "Orange = Flat-Top Peak"
                 ws["A4"] = "Yellow = Small Peak"
                 ws["A5"] = "Blue = Overloaded/Wide Peak"
+                ws["A6"] = "Red Text = Outlier"
 
                 for color, entries in self.output_flags.items():
                     # skip coloring "normal" peaks
@@ -807,10 +855,20 @@ class ReportGenerator:
                     for entry in entries:
                         i,j = entry["coords"]
                         
-                        excel_row = i+8
+                        excel_row = i+9
                         excel_col = j+2
 
                         ws.cell(row=excel_row, column=excel_col).fill = fill
+
+                # add text color to outliers
+                outlier_font = Font(color="FF0000")
+                if self.outliers:
+                    for i,j in self.outliers:
+                        row_i = i+8
+                        col_i = j+2
+
+                        cell = ws.cell(row=row_i,col=col_i)
+                        cell.font = outlier_font
 
             # get normalized values
             if out_type == "norm" or out_type == "dual":
@@ -869,8 +927,7 @@ class ReportGenerator:
         variance = pca.explained_variance_ratio_
 
         # plot variance bar graph
-        fig,ax=plt.subplots(figsize=(6,4))
-        fig.tight_layout()
+        fig,ax=plt.subplots(figsize=(7,5), constrained_layout=True)
 
         ax.bar(range(1,num_comps+1), variance, color="skyblue", edgecolor = 'k')
         ax.set_xlabel("Principal Component")
@@ -991,3 +1048,35 @@ class ReportGenerator:
 
         # save new matrix
         self.matrix = matrix
+
+    def flag_outliers(self, threshold: float = 3.5):
+        """
+        Flags outlier values columnwise in the matrix, allowing for finding of raw abundance values that stick out from the distribution expected for that molecule
+        uses a modified, MAD (median absolute deviation) based z-score function
+        Params:
+            theshold                threshold value for samples to be flagged
+        """
+        # grab data matrix
+        data = self.matrix
+        # create list to hold row,col idx for outliers
+        outliers = []
+        
+        # find outliers in each column
+        for col_i, col in enumerate(data.T):
+            median = np.median(col)
+            mad = np.median(np.abs(col-median))
+
+            # if no variation then skip this column
+            if mad == 0:
+                continue
+            
+            # calculate modified z scor
+            mod_z = 0.6745 * (col-median) / mad
+
+            # find row index values for outliers
+            for row_i, val in enumerate(mod_z):
+                if abs(val) > threshold:
+                    outliers.append((row_i,col_i))
+
+        self.outliers = outliers
+
