@@ -12,7 +12,7 @@ sys.path.insert(0, str(root_dir))
 
 from src.intensity_matrix import IntensityMatrix
 from src.config_loader import ConfigLoader
-from src.utils import log_subprocess
+from src.utils import log_subprocess,delete_file
 
 # endregion
 
@@ -61,11 +61,18 @@ class MzMLProcessor:
             process = True
 
         if process:
-            # ensure mzml dir exists
-            mzml_dir.mkdir(parents=True,exist_ok=True)
 
             # get log_dir
             log_dir = input_dir / results
+
+            # find subprocess log file
+            sub_log = log_dir / "subprocess_log.jsonl"
+            # if it exists then delete it
+            if sub_log.exists():
+                delete_file(sub_log)
+
+            # ensure mzml dir exists
+            mzml_dir.mkdir(parents=True,exist_ok=True)
 
             # run each msconvert and log results
             for sample in samples_in:
@@ -102,9 +109,11 @@ class MzMLProcessor:
             encoded_data                base64 data to be decoded
             dtype                       type of data that is converted
         """
-
-        decoded = base64.b64decode(encoded_data)
-        decompressed = zlib.decompress(decoded)
+        try:
+            decoded = base64.b64decode(encoded_data)
+            decompressed = zlib.decompress(decoded)
+        except Exception as e:
+            print(f"Exception:\n{e}")
 
         return np.frombuffer(decompressed, dtype=dtype)
 
@@ -160,40 +169,72 @@ class MzMLProcessor:
         spectra_metadata = {}
         intensity_list = []
         unique_mzs = set()
+        skipped = 0
 
         # get name of sample
         name = mzml_path.stem
+        print(f"Sample Name: {name}")
 
-        # Iterate over each <spectrum> element
+        # Iterate over each <spectrum> element and get scan information
         for spectrum in root.findall('.//spectrum', namespaces):
             scan_id = spectrum.get('id')
             if scan_id:
-                scan_id = scan_id.split('=')[-1]  # Split by '=' and take the second part (which is the number)
+                scan_id = scan_id.split('=')[-1]
 
             scan_start_time = None
             scan_list = spectrum.find('scanList', namespaces)
             if scan_list is not None:
                 scan = scan_list.find('scan', namespaces)
                 if scan is not None:
-                    scan_start_time = scan.find('.//cvParam[@name="scan start time"]', namespaces)
-                    if scan_start_time is not None:
-                        scan_start_time = scan_start_time.get('value')
+                    cv = scan.find('.//cvParam[@name="scan start time"]', namespaces)
+                    if cv is not None:
+                        scan_start_time = float(cv.get('value'))
 
-            binary_data_elements = spectrum.findall('./binaryDataArrayList/binaryDataArray/binary', namespaces)
+            # find binary data arrays
+            mz_encoded = None
+            intensity_encoded = None
 
-            if len(binary_data_elements) < 2:
-                print(f"Skipping spectrum {scan_id} due to missing binary data")
+            for bda in spectrum.findall('./binaryDataArrayList/binaryDataArray', namespaces):
+                array_type = None
+
+                for cv in bda.findall('cvParam',namespaces):
+                    acc = cv.get('accession')
+                    if acc == "MS:1000514":
+                        array_type = "mz"
+                    elif acc == "MS:1000515":
+                        array_type = "intensity"
+
+                binary = bda.find('binary',namespaces)
+                if binary is None or not binary.text:
+                    continue
+            
+                # save encoded binary data
+                if array_type == 'mz':
+                    mz_encoded = binary.text
+                elif array_type == 'intensity':
+                    intensity_encoded = binary.text
+
+            # if bianry data is not present, then skip this scan
+            if mz_encoded is None or intensity_encoded is None:
+                skipped += 1
+                continue
+
+            # decode the data
+            mz_array = MzMLProcessor.decode_binary_data(mz_encoded,dtype=np.float64)
+            intensity_array = MzMLProcessor.decode_binary_data(intensity_encoded,dtype=np.float32)
+
+            # make sure array values are valid
+            if mz_array is None or intensity_array is None:
+                skipped += 1
                 continue
 
             # Save metadata for the spectrum in the list
-            spectra_metadata[int(scan_id)-1] = float(scan_start_time)
-
-            # Grabs the binary encoded m/z and intensity arrays
-            mz_array_encoded = binary_data_elements[0].text
-            intensity_array_encoded = binary_data_elements[1].text
-
-            mz_array = MzMLProcessor.decode_binary_data(mz_array_encoded, dtype=np.float64)
-            intensity_array = MzMLProcessor.decode_binary_data(intensity_array_encoded, dtype=np.float32)
+            spectra_metadata[len(intensity_list)] = float(scan_start_time)
+            
+            # ensure consistent lengths before zipping
+            if len(mz_array) != len(intensity_array):
+                skipped += 1
+                continue
 
             # Create a dictionary for each spectrum (m/z -> intensity)
             spectrum_intensity_dict = dict(zip(mz_array, intensity_array))
@@ -203,6 +244,10 @@ class MzMLProcessor:
 
             # Add the m/z values to the set of unique m/z values
             unique_mzs.update(mz_array)
+
+        # show how many spectra have beens skipped
+        if len(skipped) > 0:
+            print(f"File: {mzml_path.stem}\nSkipped: {skipped}\n")
 
         # Convert the set of unique m/z values to a sorted list
         unique_mzs = sorted(unique_mzs)
@@ -231,7 +276,7 @@ class MzMLProcessor:
         binned_mzs.append(9999)
 
         # create intensity matrix object
-        output_matrix = IntensityMatrix(intensity_matrix=final_matrix,unique_mzs=binned_mzs,spectra_name=name,spectra_metadata=spectra_metadata)
+        output_matrix = IntensityMatrix(intensity_matrix=final_matrix,unique_mzs=binned_mzs,spectra_name=name,spectra_metadata=spectra_metadata,matrix_type="SCAN")
 
         return output_matrix
     
@@ -325,10 +370,10 @@ class MzMLProcessor:
                             matrix[-1] = decoded
 
         # convert ion map to sorted list
-        mzs = [ion for ion,idx in sorted(ion_map.items(), key=lambda x: x[1])]
+        mzs = [ion for ion,_ in sorted(ion_map.items(), key=lambda x: x[1])]
 
         # create intensity matrix object and return
-        output_matrix = IntensityMatrix(intensity_matrix=matrix,unique_mzs=mzs,spectra_name=file_name,spectra_metadata=time_map)
+        output_matrix = IntensityMatrix(intensity_matrix=matrix,unique_mzs=mzs,spectra_name=file_name,spectra_metadata=time_map,matrix_type="SIM")
         return output_matrix
     
     @staticmethod
@@ -381,4 +426,3 @@ class MzMLProcessor:
             elif acc == "MS:1000579":
                 return "SCAN"
                 
-

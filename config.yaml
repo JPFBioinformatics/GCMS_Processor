@@ -1,11 +1,11 @@
 # name of this run of the pipeline
-run_name: scans
+run_name: 1_16_25 Plasma Reruns
 
 # name of the excel template file that contains molecule name/id, mz list, and rt list to collect
-template_file: template.xlsx
+template_file: 1_16_25 Plasma Template.xlsx
 
 # full path to the imput directory where your files to be processed live
-input_dir: C:\Jack\Projects\Danica SD 2025\11_25_25 Plasma\Scans
+input_dir: 'C:\Jack\Projects\IlyaAura Mouse Labelling\1_16_25 Plasma Reruns\SIM'
 
 # path relative to input dir where results will be stored
 results_dir: results/
@@ -16,7 +16,8 @@ mzml_dir: mzml_files/
 # true to keep mzml files, False to delete once main.py is done
 keep_mzml: False
 
-rt_threshold: 0.1                   # max time (seconds) from the supplied rt a peak can be or peak is flagged
+# thesholds
+rt_threshold: 0.025                 # max time (seconds) from the supplied rt a peak can be or peak is flagged
 endpoint_threshold: 10              # max difference between endpoint heights (as a percent of max height of peak) for peak to be flagged
 variance_threshold: 1e-6            # minimum variance to be included in PCA plot
 width_threshold: 25                 # maximum width of a peak before it is flagged as overloaded

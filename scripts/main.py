@@ -26,13 +26,13 @@ def main():
     log_dir = indir / results
     log_dir.mkdir(parents=True,exist_ok=True)
     molecules,mzs,rts = cfg.load_collection_info()
+    mzml = cfg.get("mzml_dir")
+    mzml_dir = log_dir / mzml
 
     # delete old log files if you're rerunning the analysis
     log_file = log_dir / "timestamp_log.jsonl"
-    sub_log = log_dir / "subprocess_log.jsonl"
-    files = [log_file,sub_log]
-    for file in files:
-        delete_file(file)
+    if log_file.exists():
+        delete_file(log_file)
 
     # log start time
     log_timestamp(log_dir,"start",start_ts)
@@ -80,8 +80,6 @@ def main():
     # delete mzML files for 
     flag = cfg.get("keep_mzml")
     if flag == True:
-        mzml = cfg.get("mzml_dir")
-        mzml_dir = log_dir / mzml
         delete_directory(mzml_dir)
 
     # log end time

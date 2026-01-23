@@ -1,0 +1,34 @@
+[contents]
+count=4
+Name=,F:\00 Jack\Danica SD project\Danica project\Danica Scan Sample 1 .D
+1=,INT EIC Ion 189.00 (188.70 to 189.70): Danica Scan Sample 1 .D\data.ms
+2=,INT EIC Ion 190.00 (189.70 to 190.70): Danica Scan Sample 1 .D\data.ms
+3=,INT EIC Ion 191.00 (190.70 to 191.70): Danica Scan Sample 1 .D\data.ms
+4=,INT EIC Ion 192.00 (191.70 to 192.70): Danica Scan Sample 1 .D\data.ms
+[INT EIC Ion 189.00 (188.70 to 189.70): Danica Scan Sample 1 .D\data.ms]
+Time=,Fri Jan 16 11:52:23 2026
+Header=,"Peak","R.T.","First","Max","Last","PK  TY","Height","Area","Pct Max","Pct Total"
+1=,  1, 13.527, 1082,1152,1179,"BV 2",1889103, 99833181,100.00, 99.954
+2=,  2, 13.775, 1179,1186,1190,"VV 2",    706,    19863,  0.02,  0.020
+3=,  3, 13.840, 1190,1194,1203,"VV  ",   1131,    25778,  0.03,  0.026
+[INT EIC Ion 190.00 (189.70 to 190.70): Danica Scan Sample 1 .D\data.ms]
+Time=,Fri Jan 16 11:52:23 2026
+Header=,"Peak","R.T.","First","Max","Last","PK  TY","Height","Area","Pct Max","Pct Total"
+1=,  1, 13.526, 1095,1152,1171,"VV 2", 333627, 18028892,100.00, 99.659
+2=,  2, 13.776, 1178,1186,1190,"VV 2",    981,    27240,  0.15,  0.151
+3=,  3, 13.839, 1190,1194,1204,"VV  ",   1296,    34413,  0.19,  0.190
+[INT EIC Ion 191.00 (190.70 to 191.70): Danica Scan Sample 1 .D\data.ms]
+Time=,Fri Jan 16 11:52:23 2026
+Header=,"Peak","R.T.","First","Max","Last","PK  TY","Height","Area","Pct Max","Pct Total"
+1=,  1, 13.242, 1109,1113,1114,"VV 3",    512,     9371,  0.12,  0.097
+2=,  2, 13.343, 1114,1127,1132,"VV  ",  55848,  1487021, 18.44, 15.408
+3=,  3, 13.526, 1132,1151,1160,"VV  ", 155563,  8064338,100.00, 83.562
+4=,  4, 13.625, 1160,1165,1172,"VV 4",   3548,    81183,  1.01,  0.841
+5=,  5, 13.833, 1189,1193,1199,"PV 3",    415,     8839,  0.11,  0.092
+[INT EIC Ion 192.00 (191.70 to 192.70): Danica Scan Sample 1 .D\data.ms]
+Time=,Fri Jan 16 11:52:23 2026
+Header=,"Peak","R.T.","First","Max","Last","PK  TY","Height","Area","Pct Max","Pct Total"
+1=,  1, 13.342, 1100,1126,1132,"PV  ",  10171,   294629, 31.16, 20.355
+2=,  2, 13.524, 1132,1151,1158,"VV  ",  17271,   945666,100.00, 65.333
+3=,  3, 13.625, 1158,1165,1180,"VV  ",   8071,   193450, 20.46, 13.365
+4=,  4, 13.835, 1180,1194,1200,"PV 3",    332,    13706,  1.45,  0.947

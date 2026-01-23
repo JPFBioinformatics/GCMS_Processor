@@ -1,0 +1,58 @@
+﻿<SequenceTableDataSet SchemaVersion="1.0" SequenceComment="" SequenceOperator="Ilya" SequenceSeqPathFileName="C:\GCMS2 DATA\ILYA\Danica project\" SequencePreSeqAcqCommand="" SequencePostSeqAcqCommand="" SequencePreSeqDACommand="" SequencePostSeqDACommand="" SequenceReProcessing="False" SequenceInjectBarCodeMismatch="DoNotAnalyzeBarcode" SequenceOverwriteExistingData="True" SequenceDecoupleDataAnalysis="False" SequenceDelayECMUpload="False" SequenceModifiedTimeStamp="" SequenceFileECMPath="" SequenceRecurringKeyword="" SequenceRecurringInterval="0" SequenceRecurringType="0" SequenceRecurringKeywordString="">
+  <Sequence>
+    <SequenceID>0</SequenceID>
+    <SampleID>0</SampleID>
+    <AcqMethodFileName>IB_MET_TMSM0</AcqMethodFileName>
+    <AcqMethodPathName>C:\MassHunter\GCMS\1\methods\</AcqMethodPathName>
+    <Comment />
+    <Completed>false</Completed>
+    <DAMethodFileName />
+    <DAMethodPathName />
+    <DAReportPathFileName />
+    <DataFileName>Danica SIM Sample 22</DataFileName>
+    <DataPathName>C:\GCMS2 DATA\ILYA\Danica project\</DataPathName>
+    <Dilution>1</Dilution>
+    <DualInjector>false</DualInjector>
+    <DualInjectorExpectedBarcode />
+    <DualInjectorVial>92</DualInjectorVial>
+    <DualInjectorVolume>0</DualInjectorVolume>
+    <EquilibrationTime>0</EquilibrationTime>
+    <ExpectedBarcode />
+    <InjectionsPerPosition>1</InjectionsPerPosition>
+    <InjectorVolume>0.5</InjectorVolume>
+    <InstrumentName>Charizard</InstrumentName>
+    <InstrumentType>SingleQuadrupole</InstrumentType>
+    <Keyword />
+    <KeywordString />
+    <LevelName />
+    <MatrixSpikeGroup />
+    <Locked>false</Locked>
+    <PlateCode />
+    <PlatePosition>2</PlatePosition>
+    <RackCode />
+    <SampleGroup />
+    <SampleInformation />
+    <SampleName>Danica SIM Sample 22</SampleName>
+    <SamplePosition>dummy</SamplePosition>
+    <SamplePrepFileName />
+    <SamplePrepPathName />
+    <SampleType>Sample</SampleType>
+    <TrayName />
+    <UpdateResponseFactor>None</UpdateResponseFactor>
+    <UpdateRetentionTime>None</UpdateRetentionTime>
+    <UpdateQualifierRatios>None</UpdateQualifierRatios>
+    <UpdateMassAssignments>None</UpdateMassAssignments>
+    <UserDefined />
+    <UserDefined1 />
+    <UserDefined2 />
+    <UserDefined3 />
+    <UserDefined4 />
+    <UserDefined5 />
+    <UserDefined6 />
+    <UserDefined7 />
+    <UserDefined8 />
+    <UserDefined9 />
+    <Vial>92</Vial>
+    <TuneFile />
+  </Sequence>
+</SequenceTableDataSet>

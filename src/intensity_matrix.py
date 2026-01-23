@@ -18,7 +18,7 @@ from src.config_loader import ConfigLoader
 # Class for storage and cleaning of intensity matrix extracted by mzml_processor
 class IntensityMatrix:
 
-    def __init__(self, intensity_matrix: np.ndarray, unique_mzs: list, spectra_name: str = None, spectra_metadata: dict = None, cfg: ConfigLoader = ConfigLoader(root_dir / "config.yaml")):
+    def __init__(self, intensity_matrix: np.ndarray, unique_mzs: list, spectra_name: str = None, spectra_metadata: dict = None, matrix_type: str = None, cfg: ConfigLoader = ConfigLoader(root_dir / "config.yaml")):
         self.intensity_matrix = intensity_matrix
         self.unique_mzs = unique_mzs
         self.spectra_metadata = spectra_metadata
@@ -27,6 +27,7 @@ class IntensityMatrix:
         self.peak_list = None
         self.cfg = cfg
         self.spectra_name = spectra_name
+        self.matrix_type = matrix_type
 
         # calculate and apply abundnace threshold transformation to intensity matrix
         self.calculate_threshold()
@@ -176,11 +177,9 @@ class IntensityMatrix:
 
         matrix = self.intensity_matrix
 
-        # determines how many 13 scan segments that we will have, if the last segment is not full it is excluded from calculations
         num_segments = matrix.shape[1] // 13
-
-        # create an empty list of segments, each of which will be a numpy array with a row for each m/z chromatogram and a column for each 13 scan segment
         segments = []
+        noise_factors = []
 
         #loop over the number of segments creating each segment in segments as we go
         for i in range(num_segments):
@@ -189,36 +188,37 @@ class IntensityMatrix:
             segment = matrix[:, start:end]
             
             # filters out any rows that contain 0 values
-            removed_zeros = segment[~np.any(segment == 0, axis = 1)]
+            nonzero_rows = segment[~np.any(segment == 0, axis = 1)]
             
-            # stores the segments that have sufficient number of "crossings"
+            # filter rows that cross less than 7 times
             crossing_filtered = []
-
-            # filters out any rows that "cross" the average intensity 6 or fewer times
-            for row in removed_zeros:
+            for row in nonzero_rows:
                 if row.size == 0:
                     continue
                 avg = np.mean(row)
-                crossings = self.count_crossings(row,avg)
 
+                # skip rows with 0 variation
+                if avg == 0:
+                    continue
+
+                crossings = self.count_crossings(row,avg)
                 if crossings > 6:
                     crossing_filtered.append(row)
                 
             segments.append(np.array(crossing_filtered))
-        
-        # list to hold all the noise factors for each row of each segment 
-        noise_factors = []
 
         # iterate through each segment
         for segment in segments:
-            # iterate through all rows of the segment
             for row in segment:
-                # calculate noise factor for current row
                 current_nf = self.calculate_row_nf(row)
-                # append result
-                noise_factors.append(current_nf)
+                if not np.isnan(current_nf):
+                    noise_factors.append(current_nf)
 
-        self.noise_factor = np.median(noise_factors)
+        # fallback if no noise factors calculated:
+        if len(noise_factors) == 0:
+            self.noise_factor = 0
+        else:
+            self.noise_factor = np.median(noise_factors)
     
     # counts the number of times the values of an array "cross" a given average value
     def count_crossings(self,row,avg):
@@ -233,6 +233,10 @@ class IntensityMatrix:
 
         # calculate the mean of the row
         mean = np.mean(row)
+        if mean == 0:
+            return 0
+        
+        # calculate rest of row nf 
         sqrt_of_mean = mean ** 0.5
 
         # calculate deviation from the mean for all members of row
@@ -257,7 +261,6 @@ class IntensityMatrix:
         for row_idx,row in enumerate(matrix):
 
             ion = self.unique_mzs[row_idx]
-
             row_peaks = self.find_maxima(row,ion,prom=prom)
             peaks.append(row_peaks)
 
@@ -268,10 +271,15 @@ class IntensityMatrix:
     # finds local maxima and bounds of peaks for a given 1D array
     def find_maxima(self, array, ion, prom = None):
 
-        # set default prominance
+        # set prominance
         if prom == None:
-            prom = self.noise_factor*100
-
+            # handle nan/0 noise factors (SIM files have this a lot)
+            if np.isnan(self.noise_factor) or self.noise_factor == 0:
+                # set based on median and mad (3*MAD is a common noise threshold hueristic)
+                prom = np.median(array) + 3 * np.median(np.abs(array-np.median(array)))
+            else:
+                prom = self.noise_factor*100
+            
         # Excludes the first and last 12 points from the search to prevent bounding errors
         range = array[12:-12]
 
@@ -568,11 +576,23 @@ class IntensityMatrix:
             print(f"Unique mzs:\n {self.unique_mzs}")
             return None
         
-        # if no peaks are found then 
+        # if no peaks are found then store an empty peak
         if len(peaks) == 0:
-            print(self.peak_list[row_idx])
-            self.plot_ic(mz)
-            return None
+            closest_peak = {
+                'left_bound' : np.nan,
+                'right_bound' : np.nan,
+                'center' : np.nan,
+                'precise_max_location' : np.nan,
+                'precise_max_height' : np.nan,
+                'max_abundance' : np.nan,
+                'bin' : np.nan,
+                'conv_value' : np.nan,
+                'ion' : np.nan,
+                'tentative_baseline': np.nan,
+                'width': np.nan,
+                'width_flag': np.nan,
+                'flat_top': np.nan,
+            }
         
         # find the peak closest to specified RT
         try:
@@ -584,10 +604,17 @@ class IntensityMatrix:
             print(f"No peaks availbe in ion chromatogram for ion: {mz}\n{e}")
             print(len(peaks))
 
-        # check if peak is close enough to supplied RT
-        diff = abs(closest_peak['precise_max_location'] - rt)
+        # find rt difference
+        if  np.isnan(closest_peak['precise_max_location']):
+            diff = np.nan
+        else:
+            diff = abs(closest_peak['precise_max_location'] - rt)
+
+        # save rt difference to closest peak
         closest_peak["rt_diff"] = diff
-        if diff > threshold:
+        
+        # update rt valid flag
+        if np.isnan(diff) or diff > threshold:
             closest_peak["rt_valid"] = False
         else:
             closest_peak["rt_valid"] = True
@@ -723,4 +750,3 @@ class IntensityMatrix:
         plt.show()
 
     # endregion
-    
