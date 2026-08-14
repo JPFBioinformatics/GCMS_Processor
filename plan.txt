@@ -1,0 +1,150 @@
+Current issues ------------------------------------------------------------------------------------------------
+    1. Peak picking -
+        Currently we use prominance based peak picking and we run into the issue where peaks have come in 
+        a large range of height/weidth/shape so if we pick a prom small enough to detect small peaks we 
+        are going to often get larger peaks split, and our peak-picking is not robust to noise. Conversely
+        if we pick a prominance that is too large we lose a lot of the smaller peaks which is also bad for
+        untargeted work. We are also dependent on local baselines for s/n calculations so if high signal is 
+        for some reason not included in detected peaks (happens with broad, overloaded peaks) it inflates
+        local noise and makes other peaks around it not detected.
+    2. Peak identification -
+        The only metric we use to determine if a peak is a member of the same family/indicitave of the same
+        molecule is the m/z we use to collect and the peak's RT.  this comes into the issue where possible
+        co-eluding peaks could be picked by accident, or possibly a peak that is overshadowed by the true peak
+        in some samples is the peak picked in other samples due to absence of the true peak, in addition to
+        not being robust to accidental splitting of peaks.
+    
+Fixes ---------------------------------------------------------------------------------------------------------
+    There are many peak detection/catagorization paradigms in MS - GC, LC and others. To figure out which
+    is best, we should test them against one anohter and see how they preform on synthetic and on real
+    datasets.
+
+    Paradigms
+    1. Prominance -
+        What we already have, set a prominance if the peak height is a certain amount higher than the shoulders
+        it is accepted as a peak and we move on, then we have noise factor based endpoint detection that could
+        also use some shining up, espcially when it comes to overloaded, broad/flat peaks
+
+        - already implemented, big issues come from weirdly-shaped peaks and identify_bounds
+        - STEPS:
+            1. define prom as w * (median + MAD), where median/MAD are from the array of data itsef, and 
+            w is a prominance scaling weight that is toggleable (default of 0.5)
+            2. then use scipy's find_peaks here and we get a list of peaks
+
+    2. CWT -
+        Continuous Wavelet Transform basd methods have become very popular in recent years for processing 
+        chromatographic data.  You use a mexh, gaus2, etc... wavelet which is a general shape that is similar
+        to how a peak "should" look.  You slide this wavelet across the signal, and see how well local signal 
+        matches the shape, high scores are for peaks and low scores are for valleys (generally).  A scaling
+        factor a is used to determine how narrow/tall vs short and wide the peak is, and the better the match
+        the higher the score.  Translating into CWT space gives you a matrix of n_scales x n_scans where you 
+        have local maxima (ridges) and local minima/zero crossings (valleys) that can be used to estimate the
+        point where a peak maximizes and its endpoints using somethign called MSPD (multi-scale peakd detection),
+        the "crazy-crawler" algorithm, or persistent homology to determine maxima + endpoints, or maxima 
+        respectively. Gives a more informed idea of how well a section of data matches the shape of what we 
+        expect a true signal to be.
+
+        - use a SG filter when calculating R, V, Z to remove persistent noise, scaling dynamically with 
+        scale (a) due to larger scales tending to strech noise wider and smaller scales preserving high
+        frequency noise
+        - SG window should be proportional to the scale (a) being smmoothed (if we are smoothing), using the
+        doubleodd paradigm (2a + 1) and polynomial order shoudld be set to 1 if window size is <= 3 otherwise
+        it can be set to 2
+        - STEPS:
+            1. Apply CWT transformation to ion trace to produce C matrix (scales set at 1.18 log from 1 to
+            38 or 64 with 32 n_scales as default - 64 uninformed guess 38 depending on FWHH of prominance-based
+            peak picking of a dataset using lorentzian paradigm of 2.9* max HWHH or gaussian 1.9 * max FWHH)
+            2. Calculate R, V, Z (local maxima, local minima/valleys, and zero-crossings) after dynamic SG 
+            smoothing on CWT matrix
+                need a window (k) to search on either side of a point in calculating R and V, reusing
+                the doubleodd logic we would just search floor(a) for a more permissive look and turn to 
+                floor(a+0.5) (round-to-nearest) if floor seems too permissive
+            3. Group ridges based on R, starting from low a moving to high a we find the peak locations as
+            columns where R is True/1, if row i has a 1 at column j, then look to row i+1 and see if there is
+            a 1 in range [j-1,j+1], if so then add that new i,j to the ridge's list, if not then increment 
+            gap_counter for that ridge by 1, if gap_coutner reaches 3 terminate the ridge
+            4. Now with ridges we want to discard any rdiges less than a specific length (undetermined as of
+            right now, but we can use these ridges in later noise modeling) and for the rest of the ridges
+            find the column where the largest count of maxima exist, then find the highest value in C in that
+            column and move outwards from that position in V and Z matrices finding the nearset valley or zero-
+            crossing on either side as n,m endpoints, store these endpoints as well as the absolute maximum 
+            C value present in the ridge and the scale at which it maximizes
+                need to calculate S/N ratio as well, but from CWT space rather than our old raw data approach
+                noise comes from a local window of C values at a=1, we set window size dynamically based on 
+                the scale at which the maximal C 
+            5. go to raw data between scans n and m, use SG filter window = doubleodd where a = scale where
+            C maximizes for this ridge (that we recorded) to find the peak max, now we have a list of maxima,
+            C (~intensity), a (~FWHH or width) and estimated endpoints to feed into our find_maxima method 
+            with some changes (specifically with respect to identify_bounds use) 
+
+    3. Network-based -
+        Generate an embedding of local signal (Savitzky-Golay, CWT coefficeint vectors (w/ row-wise normalzation),
+        tsfresh automatic feature extraction, shapelets/SAX, possible PCA or machine learning option) so that 
+        each scan is a node in the network.  Generate a network using kNN etc... and use this to seperate noise 
+        points from signal points using clustering/classification algorihtms, and then find maxima/refine endpoints
+        within these signal sections of the data.
+
+    4. Random Forest/Tree-Ensembl Classification -
+        Generate embeddigns like #3, but this time use a random forset as a supervised classifier that is trained
+        to differentiate signal from noise, essentially an extension of #3.
+
+    5. CNN/deep-learning approaches -
+        Have seen some traction lately, with some approaches reaching >99% accuracy in peak detection with very
+        low false positive rates.  Several poitons, 1D CNN/TCN/U-Net looking at per-timpoint semantic segmentation
+        directly on raw data.  Could also start with a 2D CWT transforml ike in #2 then run a 2D CNN over it to 
+        detect features and estimate maxima/bounds.  Finally object-detection-style architecures (YOLO, Faster
+        R-CNN) for direct peak localization with bounding boxes.
+
+Datsets ---------------------------------------------------------------------------------------------------------
+
+It would serve us well to find consistent datasets to use in order to test methods/train ML algorihtms.  We 
+have a couple of options, but fundamentally the testing should be done first on synthetic datasets, allowing
+us to have precise control over where peaks start, end, and maximize.  We can either take a Monte-Carlo approach,
+as specified in "Monte-Carlo Wavelet Analysis for Objective Peak Detection in SRM LC-MS/MS Analyis" by 
+Randall K Juilain, Jr, et al.  Build an explicit nosie model (chemical and electrical) then add this to a generally
+gaussian peak we draw in order to get realistic noise, althernatively take the approach used in the GCMSformer 
+paper (we use this algorithm to deconvolde co-eluting peaks) "GCMSFormer: A fully automatic method for resolution
+of overlapping peaks in Gas Chromatography-Mass Spectrometry" by Zixuan Guo et al. Need to review their methods,
+but they trained a very good model on synthetic data so they probably have a good idea how to generate it. It is
+also important to note that the algorithm discussed in "WiPP: Workflow for Improved peak picking for gas-chromatography
+-Mass Spectrometry (GC-MS) Data" by Nico Borgsmuller et al. classifies peaks into 7 shape catagories, and if we
+are generating synthetic data we should ensure that all the peaks we generate are not simply perfectly gaussian,
+and some have other messier shapes to them in order to reflect real data.  We should then also pick a validated
+datset from online which has published results so we can see how the paradigms preform on that, as well as to
+compare our full pipeline to other, modern competitors.
+
+Main Competitors -----------------------------------------------------------------------------------------------
+
+    Benchmark Against:
+        AMDIS
+        MS-DIAL
+        XCMS
+        AntDAS-CPR
+
+    Optionally Include:
+        WiPP
+        MassCube
+
+highest height thresholds with signal areas removed
+
+Ion 9999: height_threshold = 143960.09321594238
+Ion 147: height_threshold = 21990.48046875
+Ion 129: height_threshold = 2868.9627685546875
+Ion 148: height_threshold = 2845.57275390625
+Ion 299: height_threshold = 2773.58203125
+Ion 103: height_threshold = 2316.093017578125
+Ion 135: height_threshold = 2088.944091796875
+Ion 117: height_threshold = 2066.28857421875
+Ion 133: height_threshold = 1833.7333984375
+Ion 131: height_threshold = 1789.1259765625
+
+Ion 9999: height_threshold = 272595.93475341797
+Ion 147: height_threshold = 38804.724609375
+Ion 148: height_threshold = 6148.37353515625
+Ion 129: height_threshold = 5471.3212890625
+Ion 133: height_threshold = 4767.58740234375
+Ion 103: height_threshold = 4615.4091796875
+Ion 117: height_threshold = 4547.10791015625
+Ion 217: height_threshold = 4088.549560546875
+Ion 149: height_threshold = 3883.076171875
+Ion 131: height_threshold = 3747.10888671875

@@ -235,17 +235,17 @@ def full_preprocess(matrix: np.ndarray, missing: np.ndarray, group_indices: dict
     # get requried data
     sparseness_threshold = cfg.get("sparseness_threshold")
     if not sparseness_threshold:
-        logger.warning("No sparseness threshold detected")
+        logger.warning("No sparseness threshold detected, defaulting to 0.5")
         sparseness_threshold = 0.5
 
     imputation_method = cfg.get("impute_method")
     if not imputation_method:
-        logger.warning("No imputation method detected")
+        logger.warning("No imputation method detected, defaulting to hm")
         imputation_method = 'hm'
         
     impute_knns = cfg.get("impute_knns")
-    logger.warning("No nearest neighbors setting detected")
     if not impute_knns:
+        logger.warning("No nearest neighbors setting detected, defaulting to 5")
         impute_knns = 5
     
     # copy input matrix

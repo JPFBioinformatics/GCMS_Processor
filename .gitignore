@@ -40,12 +40,15 @@ coverage.xml
 
 # Data files (optional but common)
 databases/
+peak_metrics_data/
 *.csv
 *.tsv
 *.xlsx
 *.h5
 *.hdf5
 *.db
+*.json
+*.pdf
 
 # Environment
 .env

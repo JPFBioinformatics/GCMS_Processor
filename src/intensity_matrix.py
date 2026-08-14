@@ -8,7 +8,8 @@ Class that stores an mzml file's data as a matrix for peak identification and se
 
 import h5py, copy, pywt
 import numpy as np
-from scipy.signal import find_peaks
+from scipy.signal import find_peaks, savgol_filter
+from scipy.ndimage import maximum_filter1d, minimum_filter1d, uniform_filter1d
 import matplotlib.pyplot as plt
 from src.config_loader import ConfigLoader
 from src.utils import get_run_dir, get_proj_dir, get_run_cfg_path
@@ -22,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 # Class for storage and cleaning of intensity matrix extracted by mzml_processor
 class IntensityMatrix:
-
     def __init__(self, intensity_matrix: np.ndarray,
                  unique_mzs: list,
                  cfg: ConfigLoader,
@@ -43,6 +43,10 @@ class IntensityMatrix:
         self.cfg = cfg
         self.sample_name = sample_name
         self.matrix_type = matrix_type
+        self.height_thresholds = None
+        self.first_derivs = np.zeros_like(intensity_matrix, dtype=float)
+        self.second_derivs = np.zeros_like(intensity_matrix, dtype=float)
+        self.smoothed_signal = np.zeros_like(intensity_matrix, dtype=float)
 
         # calculate and apply abundnace threshold transformation to intensity matrix
         self.calculate_threshold()
@@ -50,8 +54,9 @@ class IntensityMatrix:
         # calculate noise factor for this intensity matrix
         self.calculate_noise_factor()
         # identify peaks in this intensity matrix
+        peak_mode = cfg.get('peak_mode')
         if detect_peaks:
-            self.identify_peaks(self.intensity_matrix)
+            self.identify_peaks(self.intensity_matrix, peak_mode)
 
     # region                       ---------- Utils ----------
 
@@ -83,14 +88,13 @@ class IntensityMatrix:
                                     smaller a values have smaller differences and larger a values have 
                                     larger differences (log 1.18 scale)
         """
-
         return (np.linspace(0,1,num)**1.18) * (max - min) + min
-
+    
     # endregion
 
     # region                 ---------- Abundance Threshold ----------
 
-    def calculate_threshold(self):        
+    def calculate_threshold(self):
         """
             Counts the number of zero to nonzero transtions for each m/z in 10 approximately equally sized time segments then takes the square root
             of these values and multiplies it by the minimum abundance measured in the entire intensity matrix, use this value to replace 0 values
@@ -104,7 +108,6 @@ class IntensityMatrix:
             """
         
         intensity_matrix = self.intensity_matrix
-        min_value = np.min(intensity_matrix[intensity_matrix > 0])
         threshold_values = np.empty((len(self.unique_mzs), 10))
         segments = np.array_split(intensity_matrix, 10, axis=1)
 
@@ -116,8 +119,17 @@ class IntensityMatrix:
             segment_starts.append(start_idx)
             start_idx += segment.shape[1]
 
+        # get global min and scale threshold values to it
+        global_min = np.min(intensity_matrix[intensity_matrix > 0])
         threshold_values **= 0.5
-        threshold_values *= min_value
+        threshold_values *= global_min
+
+        # if any threshold values are 0 then replace them with a per-row min (if available else use global)
+        min_values = np.array([
+            np.min(row[row > 0]) if np.any(row > 0) else global_min
+            for row in intensity_matrix
+        ])
+        threshold_values = np.where(threshold_values == 0, min_values[:,None], threshold_values)
 
         self.abundance_threshold = {'start_idxs': segment_starts, 'values': threshold_values}
 
@@ -216,7 +228,6 @@ class IntensityMatrix:
         # return the median of the deviations / sqrt of the mean (Nf for that row)
         return nf
 
-    # calculates per-row masks to use for S/N calculations
     def noise_mask(self, peak_list: list):
         """
         Calculates per-row mask to use for S/N calculations
@@ -243,25 +254,28 @@ class IntensityMatrix:
     # region                 ---------- Finding Maxima ----------
 
     # finds the peaks (maxima and bounds) for each row of a given intensity matrix and the tic, last row is TIC
-    def identify_peaks(self, matrix):
+    def identify_peaks(self, matrix, mode='cwt'):
 
         # dict to hold the lists of peak values m/z : peak_list
         peaks = {}
         masks = []
+        height_thresholds = []
 
         for row_idx,row in enumerate(matrix):
 
             ion = self.unique_mzs[row_idx]
-            row_peaks, row_nm = self.find_maxima(row,ion)
+            row_peaks, row_nm, height_threshold = self.find_maxima(row,ion,mode)
             peaks[ion] = row_peaks
             masks.append(row_nm)
+            height_thresholds.append(height_threshold)
 
         self.peak_dict = peaks
         self.baseline_mask = np.vstack(masks)
+        self.height_thresholds = height_thresholds
 
         return peaks
 
-    def find_maxima(self, array, ion):
+    def find_maxima(self, array, ion, mode="cwt"):
         """
         Uses a 2 pass appraoch to determine bounds and peak features for each detected maxima point, defines
         baseline using valley-to-valley baseline calculation
@@ -276,33 +290,38 @@ class IntensityMatrix:
         maxima                          list of peaks for this ion's row array
         """
         sn_threshold = self.cfg.get('sn_threshold')
-        prom_mult = self.cfg.get('prominance_multiplier')
+        
         vr = self.cfg.get('valley_ratio')
 
-        # set prominance
-        median = np.nanmedian(array)
-        mad = np.nanmedian(np.abs(array - median))
-        prom = (median +  mad) * prom_mult
+        # find maxima
+        if mode == 'prom':
+            prom_mult = self.cfg.get('prominance_multiplier')
+            median = np.nanmedian(array)
+            mad = np.nanmedian(np.abs(array - median))
+            prom = (median +  mad) * prom_mult
+            max_idxs, left_bounds, right_bounds, sn_ratios, scores, scales, ridge_span = self._find_maxima_prom(array, prom)
 
-        # Excludes the first and last 12 points from the search to prevent bounding errors
-        array_range = array[12:-12]
-
-        # finds the local maxima of the given array, stores their index
-        max_idxs, _ = find_peaks(array_range, prominence=prom)
-
-        # Shifts indices found in the range for use in the original array
-        max_idxs += 12
+        elif mode == 'cwt':
+            max_idxs, left_bounds, right_bounds, sn_ratios, scores, scales, ridge_span, bl_mask = self._find_maxima_cwt(array, ion)
 
         # list to hold dictionary entries containing left_bound, right_bound and center for each maxima
         maxima = []
 
         # first pass, finds bounds of peaks and saves to maxima
-        for peak_max in max_idxs:
+        for i,peak_max in enumerate(max_idxs):
 
-            # get basic info
-            left_bound = self.find_bound(array, peak_max, -1)
-            right_bound = self.find_bound(array, peak_max, 1)
-            fit = self.quadratic_fit(array, peak_max)
+            # quad fit for RT estimation
+            smoothed = savgol_filter(array, window_length=5, polyorder=2)
+            fit = self.quadratic_fit(smoothed, peak_max)
+
+            # bounds
+            left_bound = left_bounds[i]
+            right_bound = right_bounds[i]
+            if right_bound - left_bound < 3:
+                continue
+
+            # sn_ratio
+            sn = sn_ratios[i]
 
             # detect flat top peaks
             max_val = array[peak_max]
@@ -325,13 +344,13 @@ class IntensityMatrix:
                 'ion': ion,
                 'flat_top': flat_top,
                 'cluster': None,
-                'valid': False,
+                'valid': True,
                 'processed': False,
                 'fwhh': np.nan,
                 'feature': None,
                 'valley_ratio': None,
                 'tailing_factor': np.nan,
-                'sn_ratio': np.nan,
+                'sn_ratio': sn,
                 'height': np.nan,
                 'baseline': None,
                 'bl_slope': np.nan,
@@ -339,12 +358,25 @@ class IntensityMatrix:
                 'conv': np.nan,
                 'peak_idx': -1,
                 'molecule': None,
-                'cluster': None
+                'cluster': None,
+                'cwt_score': scores[i],
+                'cwt_scale': scales[i],
+                'ridge_span': ridge_span[i]
             })
 
         # get noise mask for this row
-        row_nm = self.noise_mask(maxima)
+        if mode == 'prom':
+            row_nm = self.noise_mask(maxima)
+        elif mode == 'cwt':
+            row_nm = bl_mask
         bl_indices = np.where(row_nm)[0]
+
+        # get median/mad of baseline to use in height filter
+        bl_vals = array[bl_indices]
+        median = np.nanmedian(bl_vals)
+        mad = np.nanmedian(np.abs(bl_vals - median))
+        height_multiplier = self.cfg.get("height_multiplier")
+        height_threshold = height_multiplier * (mad)
 
         # second pass, finds baseline and other relevant features
         n_clusters = 1
@@ -372,7 +404,8 @@ class IntensityMatrix:
                 
                 # caluclate valley ratio
                 valley_height = array[maxima[j]['right_bound']]
-                valley_ratio = valley_height / min(array[peak['center']], array[next_peak['center']])
+                denom = min(array[peak['center']], array[next_peak['center']])
+                valley_ratio = valley_height / denom
 
                 # break if the valley ratio is small (cluster ends)
                 if valley_ratio < vr:
@@ -431,7 +464,7 @@ class IntensityMatrix:
                     scan1 = scan2 = center
 
                 # if maximizes directly on scan then handle, else linear impute
-                if scan1 == scan2:
+                if scan1 == scan2 or scan1 < entry['left_bound'] or scan2 > entry['right_bound']:
                     bl_i = center - entry['left_bound']
                     bl_norm = bl[bl_i]
                 else:
@@ -440,21 +473,23 @@ class IntensityMatrix:
                     bl_i2 = scan2 - entry['left_bound']
                     bl_norm = bl[bl_i1] + frac * (bl[bl_i2] - bl[bl_i1])
                 
-                # assign height
+                # assign height and check if its above threshold
                 entry['height'] = entry['raw_height'] - bl_norm
+                """height_count = 0
+                if entry['height'] < height_threshold:
+                    entry['valid'] = False
+                    height_count += 1"""
 
                 # calculate signal to noise ratio
-                sn_ratio = self.calculate_sn(entry, array, bl_indices)
-                entry['sn_ratio'] = sn_ratio
+                if mode == 'prom':
+                    sn_ratio = self.calculate_sn(entry, array, bl_indices)
+                    entry['sn_ratio'] = sn_ratio
 
                 # S/N check
                 sn_count = 0
-                if entry['sn_ratio'] < sn_threshold or np.isnan(entry['sn_ratio']):
+                if abs(entry['sn_ratio']) < sn_threshold or np.isnan(entry['sn_ratio']):
                     entry['valid'] = False
                     sn_count +=1
-                else:
-                    entry['valid'] = True
-                
                 entry['processed'] = True
 
             # update cluster counter
@@ -470,11 +505,6 @@ class IntensityMatrix:
                 peak['tailing_factor'] = self.calculate_tailing(peak,array)
                 peak['fwhh'] = self.calculate_fwhh(peak,array)
                 
-        # get peak indices and finish analysis
-        for idx, peak in enumerate(valid_peaks):
-            peak['peak_idx'] = idx
-            peak['feature'] = None
-
         # reccalculate noise mask based on valid peaks
         valid_nm = self.noise_mask(valid_peaks)
 
@@ -482,10 +512,42 @@ class IntensityMatrix:
             count_valid = len(valid_peaks)
             count_invalid = len(maxima) - count_valid
             logger.debug(f"Sample: {self.sample_name} | Ion: {ion} | Valid: {count_valid} | Invalid: {count_invalid} | Total: {len(maxima)}")
-        
-        return valid_peaks, valid_nm
 
-    def find_maxima_cwt(self, array, ion):
+        # sort peaks by RT
+        valid_peaks = sorted(valid_peaks, key=lambda p: p['center'])
+
+        # get peak indices and finish analysis
+        for idx, peak in enumerate(valid_peaks):
+            peak['peak_idx'] = idx
+            peak['feature'] = None
+
+        return valid_peaks, valid_nm, height_threshold
+
+    def _find_maxima_prom(self, array, prom):
+
+        array_range = array[12:-12]
+
+        max_idxs,_ = find_peaks(array_range,prominence=prom)
+        max_idxs += 12
+
+        left_bounds = [self.find_bound(array,m,-1) for m in max_idxs]
+        right_bounds = [self.find_bound(array,m,1) for m in max_idxs]
+
+        sn = np.full(len(max_idxs), np.nan)
+        scores = np.full(len(max_idxs), np.nan)
+        scales = np.full(len(max_idxs), np.nan)
+        ridge_span = np.full(len(max_idxs), np.nan)
+
+        return max_idxs, left_bounds, right_bounds, sn, scores, scales, ridge_span
+
+    def _find_maxima_cwt(self, array, ion):
+
+        max_info, bl_mask = self.find_peaks_cwt(array, ion, wavelet='mexh')
+
+        return (max_info['maxima'], max_info['l_bounds'], max_info['r_bounds'], max_info['sn_ratios'],
+                max_info['scores'], max_info['scales'], max_info['scale_ranges'], bl_mask)
+
+    def find_peaks_cwt(self, array, ion, wavelet='mexh'):
         """
         uses a continuous wavelet transform (CWT) to detect peaks in a given array
         """
@@ -493,8 +555,8 @@ class IntensityMatrix:
         # get scale array
         min_a = self.cfg.get('min_a')
         max_a = self.cfg.get('max_a')
-        n_passes = self.cfg.get('n_passes')
-        scales = self.get_cwt_scales(min_a,max_a,n_passes)
+        n_scales = self.cfg.get('n_scales')
+        scales = self.get_cwt_scales(min_a,max_a,n_scales)
 
         # pad array
         margin = int(8 * np.nanmax(scales))                             # default wavelet is [-8,8] scaled to scale, take half that for padding
@@ -506,12 +568,535 @@ class IntensityMatrix:
         padded = np.concatenate([left_pad,array,right_pad])
 
         # preform CWT transformation, gives coefficients matrix of len(scales) x len(array[12:-12])
-        coefficients, _ = pywt.cwt(padded, scales, 'mexh', method='fft')
+        coefficients, _ = pywt.cwt(padded, scales, wavelet=wavelet, method='fft')
 
         # remove padded sections
         coefficients = coefficients[:,margin:-margin]
 
-        return coefficients
+        # find maxima and baseline mask and return
+        max_info, bl_mask = self._process_cwt_matrix(ion, coefficients, scales)
+
+        return max_info, bl_mask
+
+    def _process_cwt_matrix(self, ion, coefficients, scales):
+        """
+        Calculates ridge (R) valley (V) and zero-crossing (Z) bool matrices from the coefficients
+        matrix and identifies local maxima, estimated endpoints, score and scale from the coefficients
+        matrix peak's ridge has a maximum score.  Stores results as a dict, where each peak
+        corresponds to an index location in lists under keys maxima, l_bound, r_bound, scale, score, sn_ratio
+        """
+
+        # get our RVZ matrices
+        R, V, Z = self._create_RVZ_matrices(coefficients, scales)
+
+        # get ridge coordinates
+        ridge_info = self._trace_ridges(R, scales, ridge_tol=1, gap_tol=3)
+
+        # process ridges for endpoints and maxima
+        max_info = {
+            'maxima': [],
+            'l_bounds': [],
+            'r_bounds': [],
+            'sn_ratios': [],
+            'scales': [],
+            'scores': [],
+            'n_ridges': [],
+            'scale_ranges': []
+        }
+        scan_to_idx = {}
+
+        # store beginning of baseline mask
+        bl_mask = np.ones(R.shape[1], dtype=bool)
+
+        # get raw signal
+        raw = self.intensity_matrix[self.ion_map[ion]]
+
+        # smooth to find local maxima
+        signal = savgol_filter(raw, window_length=5, polyorder=2)
+        self.first_derivs[self.ion_map[ion]] = savgol_filter(raw, window_length=5, polyorder=2, deriv=1)
+        self.second_derivs[self.ion_map[ion]] = savgol_filter(raw, window_length=5, polyorder=2, deriv=2)
+        self.smoothed_signal[self.ion_map[ion]] = signal
+        local_max_mask = signal == maximum_filter1d(signal,size=5)
+        local_max_idxs = np.where(local_max_mask)[0]
+
+        # smooth to find local minima (several times to cover different peak sizes)
+        min_filter = self.cfg.get('min_bound_filter_size')
+        max_filter = self.cfg.get('max_bound_filter_size')
+        if min_filter % 2 == 0:
+            if min_filter == 0:
+                raise ValueError(f"Min Filter must be an odd integer > 0")
+            min_filter -= 1
+        if max_filter % 2 == 0:
+            max_filter += 1
+        bound_arrays = {
+            w: savgol_filter(raw, window_length=w, polyorder=2)
+            for w in range(min_filter, max_filter+1, 2)
+        }
+        min_masks = {
+            w: bound_arrays[w] == minimum_filter1d(bound_arrays[w], size=w)
+            for w in range(min_filter, max_filter+1, 2)
+        }
+
+        for ridge, scale_range in ridge_info:
+
+            # build dict of cols: points for this ridge
+            max_c = float('-inf')
+            max_a_idx = None
+            cols = {}
+            for (i,j) in ridge:
+
+                # get scale and coefficients of the point
+                coeff = coefficients[i,j]
+
+                # add new column if not present in cols
+                if j not in cols:
+                    cols[j] = {'coeffs': [], 'scales': []}
+
+                # add maxa/maxc to branch if this i,j has higher c than previous maxc
+                if coeff > max_c:
+                    max_c = coeff
+                    max_a_idx = i
+
+                # append coefficient + scale to lists
+                cols[j]['coeffs'].append(coeff)
+                cols[j]['scales'].append(i)
+
+            # find the column(s) where most ridge maxima occur, c,a maxes for finding bounds, these are NOT saved
+            max_col = None
+            max_scale = scales[max_a_idx]
+            col_max_c = float('-inf')
+            col_max_a = 0
+            max_count = -1
+            for j, entry in cols.items():
+
+                # get entry data
+                col_coeffs = entry['coeffs']
+                col_scales = entry['scales']
+                c_max = np.nanmax(col_coeffs)
+                a_max = col_scales[np.nanargmax(c_max)]
+                count = len(col_coeffs)
+
+                # update info if current beats previous max
+                if count > max_count:
+                    max_col = j
+                    col_max_a = a_max
+                    col_max_c = c_max
+                    max_count = count
+
+                # if they tie then check scores, choose higher score
+                elif count == max_count:
+                    if c_max > col_max_c:
+                        max_col = j
+                        col_max_a = a_max
+                        col_max_c = c_max
+                    # if scores tie then choose smaller scale to preference narrower bounds
+                    elif c_max == col_max_c:
+                        if a_max < col_max_a:
+                            max_col = j
+                            col_max_a = a_max
+                            col_max_c = c_max
+
+            # exclude ridges whose max col is too close to edges of the row
+            if max_col < 12 or max_col >= coefficients.shape[1] - 12:
+                continue
+
+            # find nearest local max + mins
+            max_scan, l, r = self._nearest_local_max(ion, signal, max_col, local_max_idxs)
+            if max_scan is None:
+                continue
+
+            # exclude max scans that are too far to the edge
+            if max_scan < 12 or max_scan >= coefficients.shape[1] - 12:
+                continue
+
+            # calculate bounds
+            l_bound, r_bound = self._nearest_bounds(signal, max_scan, max_scale,
+                                                    min_masks, l, r)
+            if ion == 147 and self.time_map[max_scan] - 5.7593 < 0.1:
+                logger.info(f"Left Bound: {l_bound} Max Scan: {max_scan} Right Bound: {r_bound}")
+
+            # reject + log bad peaks
+            if l_bound > max_scan or r_bound < max_scan or r_bound <= l_bound:
+                logger.info(f"Rejected bad bounds: l={l_bound} r={r_bound} max={max_scan}")
+                continue
+
+            # update bl_mask
+            bl_mask[l_bound:r_bound+1] = 0
+
+            # save data, merging ridges if they have the same maxima and incrementing n_ridges
+            if max_scan in scan_to_idx:
+                idx = scan_to_idx[max_scan]
+                max_info['n_ridges'][idx] += 1
+                max_info['l_bounds'][idx] = min(max_info['l_bounds'][idx], l_bound)
+                max_info['r_bounds'][idx] = max(max_info['r_bounds'][idx], r_bound)
+                if max_c > max_info['scores'][idx]:
+                    max_info['scales'][idx] = max_scale if max_scale is not None else np.nan
+                    max_info['scores'][idx] = max_c
+                if scale_range > max_info['scale_ranges'][idx]:
+                    max_info['scale_ranges'][idx] = scale_range
+            else:
+                scan_to_idx[max_scan] = len(max_info['maxima'])
+                max_info['scale_ranges'].append(scale_range)
+                max_info['maxima'].append(max_scan)
+                max_info['l_bounds'].append(l_bound)
+                max_info['r_bounds'].append(r_bound)
+                max_info['scales'].append(max_scale if max_scale is not None else np.nan)
+                max_info['scores'].append(max_c)
+                max_info['n_ridges'].append(1)
+
+        # calculate s/n raito of peak
+        bl_idxs = np.where(bl_mask)[0]
+        for i,maxima in enumerate(max_info['maxima']):
+            max_info['sn_ratios'].append(self._cwt_sn_ratio(coefficients[0,:],
+                                                            maxima,
+                                                            max_info['scores'][i],
+                                                            bl_idxs,
+                                                            n_closest=20,
+                                                            mode='mad'))
+        
+        return max_info, bl_mask
+
+    def _nearest_bounds(self, signal, max_scan, max_scale, min_masks, l=None, r=None):
+        
+        # get min/max filter sizes
+        min_filter = self.cfg.get('min_bound_filter_size')
+        max_filter = self.cfg.get('max_bound_filter_size')
+
+        # get filter window based on estimated peak width from max_scale
+        filter_window = int(max_scale)*2 + 1
+        filter_window = max(filter_window, 5)
+
+        # find bounds for slicing local signal
+        if l is not None or r is not None:
+            low = max(0, l - filter_window*2)
+            high = min(r + filter_window*2, len(signal)-1)
+        else:
+            low = max(0, max_scan - filter_window*2)
+            high = min(max_scan + filter_window*2, len(signal))
+
+        # odd-correct max_scale to use as size for minimum filter
+        if int(max_scale) % 2 == 0:
+            filter_size = int(max_scale) + 1
+        else:
+            filter_size = int(max_scale)
+        filter_size = max(filter_size, min_filter)
+        filter_size = min(filter_size, max_filter)
+
+        # find local minima indices
+        local_min_mask = min_masks[filter_size][low:high+1]
+        local_min_idxs = np.where(local_min_mask)[0]
+
+        # find the nearerst local minima to max_scan
+        local_max_scan = max_scan-low
+        insert_idx = np.searchsorted(local_min_idxs, local_max_scan, side='right')
+        l_bound = local_min_idxs[insert_idx-1] + low if insert_idx > 0 else low
+        r_bound = local_min_idxs[insert_idx] + low if insert_idx < len(local_min_idxs) else high-1
+
+        return l_bound, r_bound
+
+    def _nearest_bounds_new(self, signal, max_scan, max_scale, first_deriv, min_masks, l = None, r = None):
+        """
+        Takes a local maxima, smooths local signal based on max_scale approximation of FWHH then
+        finds nearest local minima
+        """
+
+        # get min/max filter sizes
+        min_filter = self.cfg.get('min_bound_filter_size')
+        max_filter = self.cfg.get('max_bound_filter_size')
+
+        # odd-correct max_scale to use as size for minimum filter
+        if int(max_scale) % 2 == 0:
+            filter_size = int(max_scale) + 1
+        else:
+            filter_size = int(max_scale)
+        filter_size = max(filter_size, min_filter)
+        filter_size = min(filter_size, max_filter)
+
+        # find local minima indices
+        min_idxs = np.where(min_masks[filter_size])[0]
+
+        # get anchors (max scan unless top is flat)
+        l_anchor = l if l is not None else max_scan
+        r_anchor = r if r is not None else max_scan
+
+        # calculate max_bound_dist based on scale
+        max_bound_dist = int(max_scale) * 2 + 1
+        max_bound_dist = max(10, max_bound_dist)
+        max_bound_dist = min(max_bound_dist, 20)
+
+        # find bounds
+        l_bound = self._find_one_bound(signal, first_deriv, min_idxs, l_anchor, direction=-1, 
+                                       max_dist=max_bound_dist)
+        r_bound = self._find_one_bound(signal, first_deriv, min_idxs, r_anchor, direction=1,
+                                       max_dist=max_bound_dist)
+
+        return l_bound, r_bound
+
+    def _find_one_bound(self, signal, first_deriv, min_idxs, start, direction, max_dist):
+
+        # first option, nearest local minimum within max_dist
+        insert_idx = np.searchsorted(min_idxs, start, side='right')
+        candidate = min_idxs[insert_idx-1] if direction < 0 and insert_idx > 0 \
+                    else min_idxs[insert_idx] if direction > 0 and insert_idx < len(min_idxs) \
+                    else None
+        if candidate is not None and abs(candidate - start) <= max_dist:
+            return candidate
+
+        # second option, first derivative nears 0 (wider range than first option)
+        window = slice(max(0,start-max_dist*3), min(start+max_dist*3+1, len(signal)-1))
+        dervi_thresh = 0.1*np.nanmax(np.abs(first_deriv[window]))
+        candidate = self._walk_until(len(signal), start, direction, max_dist*3,
+                                     lambda j: abs(first_deriv[j]) < dervi_thresh)
+        if candidate is not None:
+            return candidate
+
+        # thrid option, end of the array
+        return max(0, start-max_dist) if direction < 0 else min(len(signal)-1, start+max_dist)
+
+    def _walk_until(self, arr_len, start, direction, max_dist, condition):
+        j = start
+        dist = 0
+        while 0 <= j < arr_len and dist <= max_dist:
+            if condition(j):
+                return j
+            j+= direction
+            dist += 1
+        return None
+    
+    def _nearest_local_max(self, ion, signal, max_col, local_max_idxs, tol_frac: float = 0.01):
+        """
+        Finds nearest local maxima to a max column identified by a ridge
+        """
+
+        # find nearest local maximimum to the ridges' column
+        insert_idx = np.searchsorted(local_max_idxs, max_col)
+        candidates = []
+        if insert_idx > 0 :
+            candidates.append(local_max_idxs[insert_idx-1])
+        if insert_idx < len(local_max_idxs):
+            candidates.append(local_max_idxs[insert_idx])
+        if not candidates:
+            return None, None, None
+
+        # find nearest maxima
+        nearest =  min(candidates, key=lambda x: abs(x-max_col))
+        tol = signal[nearest] * tol_frac
+
+        # test to see if peak is flat-topped
+        on_flat_top =   (nearest > 0 and abs(signal[nearest-1] - signal[nearest]) < tol) or \
+                        (nearest < len(signal)-1 and abs(signal[nearest+1] - signal[nearest]) < tol)
+        if on_flat_top:
+            nearest, l, r = self._snap_to_plateau_center(signal, nearest, tol_frac)
+            if ion == 147:
+                logger.info(f"Ion: {ion} l: {self.time_map[l]} RT: {self.time_map[nearest]} r: {self.time_map[r]}")
+            return nearest, l, r
+
+        return nearest, None, None
+
+    def _snap_to_plateau_center(self, signal, max_col, tol_frac: float = 0.01):
+        """
+        snaps maxima to the middle of a flat-topped section of a chromatogram
+        """
+        max_val = signal[max_col]
+        tol = abs(max_val) * tol_frac
+
+        left = max_col
+        while left > 0 and abs(signal[left-1]-max_val) <= tol:
+            left -= 1
+        right = max_col
+        while right < len(signal)-1 and abs(signal[right+1] - max_val) <= tol:
+            right += 1
+        return (left + right)//2, left, right
+
+    def _cwt_sn_ratio(self, noise_row, max_i, max_c, bl_idxs, n_closest: int=20, mode='mad'):
+        """
+        Calculates S/N ratio in CWT space, allows for negative noise values which we keep
+        since it is useful t 
+        """
+        
+        # get n_closest bl positons on each side of max_i and concatnate to get local bl idx arrays
+        left_bl = bl_idxs[bl_idxs < max_i][-n_closest:]
+        right_bl = bl_idxs[bl_idxs > max_i][:n_closest]
+        bl = np.concatenate([left_bl, right_bl])
+
+        # mad or range based noise definition
+        bl_signal = noise_row[bl] if len(bl) > 0 else noise_row[bl_idxs]
+        if mode == 'mad':
+            median = np.nanmedian(bl_signal)
+            noise = np.nanmedian(np.abs(bl_signal - median))
+        else:
+            noise = np.nanmax(bl_signal) - np.nanmin(bl_signal)
+
+        # add a minimum noise to prevent S/N errors and dividing by 0
+        min_noise = 1e-5 * abs(max_c)
+        noise = max(noise, min_noise)
+
+        return max_c / noise
+
+    def _cwt_find_bound(self, z_row, v_row, center, step, max_search=15):
+        """
+        finds a right bound if step = 1 or left if step = -1 by looking for idx of nearest true value 
+        in v_row, if none exists within range max_search then return nearest z_row true idx, if that is 
+        not wihtin max_search then return idx max_search from the cetner
+        """
+        j = center
+        steps_taken = 0
+        z_fallback = None
+        while 0 <= j < len(z_row) and steps_taken < max_search:
+            if v_row[j]:
+                return j
+            if z_row[j] and z_fallback is None:
+                z_fallback = j
+            j += step
+            steps_taken += 1
+        if z_fallback is not None:
+            return z_fallback
+        j -= step
+        return j    # return endpoint if no true hit
+
+    def _trace_ridges(self, R, scales, ridge_tol: int=1, gap_tol: int=3):
+        """
+        Takes the R matrix and returns a list of ridges (each ridge is a list of i,j coordinates)
+        
+        Params
+        ------
+            ridge_tol                   tolerance to ridge maxima "wiggling" in scan space
+            gap_tol                     how many simultaneous gaps can exist in a rdige before it is terminated
+
+        Returns
+        -------
+            completed_ridges            list of lists of i,j coords that make up each ridge
+        """
+
+        # ridge data, lists of dicts with points: [i,j pairs], current_scan: most recently added j, gap_count: gap counter
+        active_ridges = []
+        completed_ridges = []
+        seen_ridge_keys = set()
+
+        # get minimum range of scales a ridge must cross to be considered valid
+        min_scale_range = self.cfg.get('min_scale_range')
+
+        # process R for ridges
+        for i,row in enumerate(R):
+
+            # get candidates for this row and start set to track which have been assigned
+            candidates = np.where(row)[0]
+            used = set()
+
+            # initialize active ridges if first row
+            if i == 0:
+                for j in candidates:
+                    ridge = {
+                        'points': [(i,j)],
+                        'current_scan': j,
+                        'gap_count': 0
+                    }
+                    active_ridges.append(ridge)
+                continue
+
+            # extend active ridges
+            still_active = []
+            for ridge in active_ridges:
+
+                current_scan = ridge['current_scan']
+                nearby = candidates[np.abs(candidates - current_scan) <= ridge_tol]
+
+                # if there are maxima nearby then add to ridge
+                if len(nearby) > 0:
+                    next_scan = nearby[np.argmin(np.abs(nearby - current_scan))]    # nearest point
+                    ridge['points'].append((i,next_scan))
+                    ridge['current_scan'] = next_scan
+                    ridge['gap_count'] = 0
+                    used.add(next_scan)
+                    still_active.append(ridge)
+                else:
+                    ridge['gap_count'] += 1
+                    if ridge['gap_count'] < gap_tol:
+                        still_active.append(ridge)
+                    else:
+                        scale_range = self._get_ridge_scale_range(ridge,scales)
+                        if scale_range >= min_scale_range:
+                            key = (len(ridge['points']), ridge['points'][0], ridge['points'][-1])
+                            if key not in seen_ridge_keys:
+                                seen_ridge_keys.add(key)
+                                completed_ridges.append((ridge['points'], scale_range))
+
+            # update active ridges 
+            active_ridges = still_active
+
+            # start new ridge if any candidates not reached
+            for j in candidates:
+                if j not in used:
+                    ridge = {
+                        'points': [(i,j)],
+                        'current_scan': j,
+                        'gap_count': 0
+                    }
+                    active_ridges.append(ridge)
+
+        # once all rows processed add all still active ridges to completed ridges
+        for ridge in active_ridges:
+            scale_range = self._get_ridge_scale_range(ridge,scales)
+            if scale_range >= min_scale_range:
+                key = (len(ridge['points']), ridge['points'][0], ridge['points'][-1])
+                if key not in seen_ridge_keys:
+                    seen_ridge_keys.add(key)
+                    completed_ridges.append((ridge['points'], scale_range))
+
+        return completed_ridges
+
+    def _get_ridge_scale_range(self,ridge,scales):
+        scale_idxs = [i for (i,_) in ridge['points']]
+        scale_range = (scales[np.nanmax(scale_idxs)] - scales[np.nanmin(scale_idxs)])
+        return scale_range
+
+    def _create_RVZ_matrices(self, coefficients, scales):
+        """
+        Takes coefficient matrix and identifies Ridge Valley and Zero-crossing positions, storing them
+        in R, V, and Z bool matrices respectively
+        """
+        # initialize bool matrices
+        R = np.zeros_like(coefficients, dtype=bool)
+        V = np.zeros_like(coefficients, dtype=bool)
+        Z = np.zeros_like(coefficients, dtype=bool)
+
+        # row-by row process coefficients matrix
+        for i,row in enumerate(coefficients):
+
+            # get the scale for this row and use it to generate window/power for SG filter
+            scale = scales[i]
+            k = int(scale)
+            window = k + 1
+            if window % 2 == 0:
+                window += 1
+            order = 1 if window == 3 else 2
+
+            # SG smooth the row
+            smoothed = savgol_filter(row, window_length=window, polyorder=order)
+
+            # find zero crossings
+            signs = np.sign(smoothed)
+            z_row = np.zeros_like(smoothed, dtype=bool)
+            z_row[1:] = signs[1:] != signs[:-1]
+
+            # find local max/min values
+            local_max = maximum_filter1d(smoothed, size=window)
+            local_min = minimum_filter1d(smoothed, size=window)
+            r_row = (smoothed == local_max)
+            v_row = (smoothed == local_min)
+
+            # mask first scale (half window) values in r and v rows to False due to implicit padding in filter1d
+            r_row[:k] = False
+            r_row[-k:] = False
+            v_row[:k] = False
+            v_row[-k:] = False
+
+            # save values
+            Z[i,:] = z_row
+            R[i,:] = r_row
+            V[i,:] = v_row
+
+        return R, V, Z
 
     # finds the left or right deconvolution bound for a given maxima, step = 1 for right bound step = -1 for left bound
     def find_bound(self, array, center, step, frac: float = 0.01, max_width: int = 25, sustain_n: int = 3):
@@ -691,7 +1276,7 @@ class IntensityMatrix:
 
         return rate_sum
 
-    def calculate_sn(self, peak: dict, row_array: np.ndarray, bl_indices: np.ndarray, n_closest: int = 20):
+    def calculate_sn(self, peak: dict, row_array: np.ndarray, bl_indices: np.ndarray, n_closest: int = 20, mode='mad'):
         """
         Calculates S/N ratio for a given peak using the baseline mask to determine local
         noise. If this calculation fails then falls back to avereage noise level for
@@ -739,6 +1324,9 @@ class IntensityMatrix:
         baseline = peak['baseline']
         left = peak['left_bound']
         right = peak['right_bound']
+        center_scan = peak['center']
+        if center_scan == left or center_scan == right:
+            return np.nan
 
         # calculate signal array (bl corrected) and corrected center
         signal = row_array[left:right+1] - baseline
@@ -785,6 +1373,9 @@ class IntensityMatrix:
         baseline = peak['baseline']
         left = peak['left_bound']
         right = peak['right_bound']
+        center_scan = peak['center']
+        if center_scan == left or center_scan == right:
+            return np.nan
 
         # calculate signal array (bl corrected) and corrected center
         signal = row_array[left:right+1] - baseline
@@ -837,6 +1428,7 @@ class IntensityMatrix:
 
         # get the index of the peak maximum
         max_idx = np.argmax(component_array)
+
         # if peak is flat top then assign the max to the midpoint
         if max_idx == 0 or max_idx == (right_bound - left_bound):
             max_idx = (right_bound - left_bound) // 2 
@@ -1023,17 +1615,16 @@ class IntensityMatrix:
         right = signal[-1]
         max_val = signal[peak['center'] - peak["left_bound"]]
         
-        # calculate % difference from each endpoint to max
-        left_diff = 100 * (max_val - left) / max_val
-        right_diff = 100 * (max_val - right) / max_val
-
-        # calculate the diff between endpoints
-        symmetry = left_diff - right_diff
-        peak["bound_symmetry"] = symmetry
-        if abs(symmetry) > end_threshold:
-            peak["symmetry_valid"] = False
+        # calculate bound symmetry and endpoint validity
+        if max_val == 0:
+            peak['bound_symmetry'] = np.nan
+            peak['symmetry_valid'] = False
         else:
-            peak["symmetry_valid"] = True
+            left_diff = 100 * (max_val - left) / max_val
+            right_diff = 100 * (max_val - right) / max_val
+            symmetry = left_diff - right_diff
+            peak["bound_symmetry"] = symmetry
+            peak['symmetry_valid'] = abs(symmetry) <= end_threshold
 
         # adjust to baseline
         if len(signal) != len(peak['baseline']):

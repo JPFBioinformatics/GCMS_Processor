@@ -406,7 +406,7 @@ class PeakViewWidget(QWidget):
 
     def initUI(self):
         
-        table_rows = ['RT', 'Ion', 'Molecule', 'Area', 'Height', 'FWHH', 'Taling', 'S/N Ratio', 'Sharpness', 'Theoretical Plates']
+        table_rows = ['RT', 'Ion', 'Molecule', 'Area', 'Height', 'FWHH', 'Taling', 'S/N Ratio', 'Sharpness', 'Theoretical Plates', 'Score', 'Scale', 'Ridge Span']
         self.table.setRowCount(len(table_rows))
         self.table.setColumnCount(1)
         self.table.setVerticalHeaderLabels(table_rows)
@@ -463,6 +463,9 @@ class PeakViewWidget(QWidget):
         tf = peak.get('tailing_factor', 0) or 0
         sn_ratio = peak.get('sn_ratio', 0) or 0
         conv = peak.get('conv', 0) or 0
+        cwt_score = peak.get('cwt_score', 0) or 0
+        cwt_scale = peak.get('cwt_scale', 0) or 0
+        ridge_span = peak.get('ridge_span', 0) or 0
         if fwhh == 0:
             tp = 0
         else:
@@ -478,6 +481,9 @@ class PeakViewWidget(QWidget):
         self.table.setItem(7,0,QTableWidgetItem(f"{sn_ratio:.2f}"))
         self.table.setItem(8,0,QTableWidgetItem(f"{conv:.2f}"))
         self.table.setItem(9,0,QTableWidgetItem(f"{tp:.2f}"))
+        self.table.setItem(10,0,QTableWidgetItem(f"{cwt_score:.2f}"))
+        self.table.setItem(11,0,QTableWidgetItem(f"{cwt_scale:.2f}"))
+        self.table.setItem(12,0,QTableWidgetItem(f"{ridge_span:.2f}"))
 
 class SpectrumViewWidget(QWidget):
     def __init__(self, intensity_matrix, peak, parent = None):

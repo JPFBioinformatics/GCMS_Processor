@@ -214,8 +214,6 @@ class RunData:
                     im.save_h5_object(self.proj_name, self.run_name)
 
         except Exception:
-            if run_dir is not None and run_dir.exists():
-                shutil.rmtree(run_dir)
             raise
 
         finally:

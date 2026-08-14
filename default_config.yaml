@@ -16,7 +16,8 @@ max_mz: 1000                        # maximum m/z value to include when binning 
 min_mz: 50                          # same as above but minimum
 max_signal: 1000000000              # max signal (1e9) if signal is above this it is set to 0 and seen as an error
 
-# peak picking thresholds
+# peak picking
+peak_mode: cwt                      # mode to pick peaks with, currently we only have cwt for continuous wavelet transform and prom for prominance-based
 rt_threshold: 0.1                   # max time (seconds) from the supplied rt a peak can be or peak is flagged (USDA/EU Commision says 0.1 is standard)
 endpoint_threshold: 10              # max difference between endpoint heights (as a percent of max height of peak) for peak to be flagged
 variance_threshold: 1e-6            # minimum variance to be included in PCA plot
@@ -26,8 +27,13 @@ prominance_multiplier: 0.5          # value to multiply prominance by when detec
 valley_ratio: 0.5                   # raito of the height of a valley (endpoint between peaks) and the height of the smaller peak for valley-to-valley baseline calculation
 sp_sim_threshold: 0.85              # threshold for cosine similarity of spectra, below this is flagged as a 'bad identification' of a peak
 min_a: 1                            # minimum scale (a) for cwt peak picking
-max_a: 75                           # maximum scale (a) for cwt peak picking
-n_passes: 32                        # number of passes (distinct a values) to evaluate for cwt peak picking
+max_a: 64                           # maximum scale (a) for cwt peak picking, chosen via min((N-1)/16, 64) where N is number of time points in array (there are other approaches like 1.9*max FWHH or 2.9* max HWHH for gaus or lorentz transforms respectively that give smaller ranges)
+n_scales: 32                        # number of passes (distinct a values) to evaluate for cwt peak picking
+height_multiplier: 1                # threshold * MAD noise in local baseline for detecting 
+min_scale_range: 2                  # minimum range of scale values a ridge must pass over to be included as not noise
+min_bound_filter_size: 5            # minimum size for minimum_filter1D size parameter when detecting endpoints
+max_bound_filter_size: 11           # maximum size for minimum_filter1D size parameter when detecting endpoints
+cwt_min_score: 1                    # minimum score from cwt matrix for a ridge to be considered
 
 # preprocessing settings
 sparseness_threshold: 0.5           # if ALL groups have >= this fraction of missing data then drop the feature from future analysis
