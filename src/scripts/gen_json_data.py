@@ -34,7 +34,7 @@ peak_mode = cfg.get('peak_mode')
 
 starttime = datetime.now()
 
-im = create_scan_matrix(file_path, cfg=cfg)
+im = create_scan_matrix(file_path, cfg=cfg, apply_thresholds = False)
 
 endtime = datetime.now()
 

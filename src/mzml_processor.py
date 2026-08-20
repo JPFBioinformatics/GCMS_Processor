@@ -165,7 +165,7 @@ def bin_masses(unique_mzs, intensity_matrix, max_mz, min_mz):
 
     return list(binned_mzs), binned_matrix 
 
-def create_scan_matrix(mzml_path, cfg):
+def create_scan_matrix(mzml_path, cfg, apply_threshold = True):
     """
     Extracts spectra metadata and builds a matrix where each spectrum is
     represented by a column and each unique m/z is represented by a row from a SCAN file
@@ -314,7 +314,8 @@ def create_scan_matrix(mzml_path, cfg):
                                     sample_name=name,
                                     time_map=time_map,
                                     matrix_type="SCAN",
-                                    detect_peaks=True)
+                                    detect_peaks=True,
+                                    apply_threshold=apply_threshold)
     logger.info(f"Sample: {name} IntensityMatrix Created")
 
     time_vals = output_matrix.get_time_per_scan()

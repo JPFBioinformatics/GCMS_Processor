@@ -29,7 +29,9 @@ class IntensityMatrix:
                  sample_name: str = None,
                  time_map: dict = None,
                  matrix_type: str = None,
-                 detect_peaks: bool = False):
+                 detect_peaks: bool = False,
+                 apply_threshold: bool = True):
+        
         self.intensity_matrix = intensity_matrix
         self.unique_mzs = unique_mzs
         self.ion_map = {mz:i for i,mz in enumerate(self.unique_mzs)}
@@ -55,7 +57,8 @@ class IntensityMatrix:
 
         # calculate and apply abundnace threshold transformation to intensity matrix
         self.calculate_threshold()
-        self.apply_threshold()
+        if apply_threshold:
+            self.apply_threshold()
         # calculate noise factor for this intensity matrix
         self.calculate_noise_factor()
         # identify peaks in this intensity matrix
