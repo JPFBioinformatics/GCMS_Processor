@@ -44,9 +44,14 @@ class IntensityMatrix:
         self.sample_name = sample_name
         self.matrix_type = matrix_type
         self.height_thresholds = None
+        self.ridge_widths = None
+
+        # embedding matrices
         self.first_derivs = np.zeros_like(intensity_matrix, dtype=float)
         self.second_derivs = np.zeros_like(intensity_matrix, dtype=float)
         self.smoothed_signal = np.zeros_like(intensity_matrix, dtype=float)
+        self.cwt_scores = np.zeros_like(intensity_matrix, dtype=float)
+        self.cwt_scales = np.zeros_like(intensity_matrix, dtype=float)
 
         # calculate and apply abundnace threshold transformation to intensity matrix
         self.calculate_threshold()
@@ -72,7 +77,8 @@ class IntensityMatrix:
             'stdev': np.nanstd(diffs)
         }
 
-    def get_cwt_scales(self, min, max, num):
+    @staticmethod
+    def get_cwt_scales(min, max, num):
         """
         Produces an array of scale (a) values to use for CWT peak picking
         
@@ -578,6 +584,19 @@ class IntensityMatrix:
 
         return max_info, bl_mask
 
+    def _max_scores_and_scales(self, coefficients, scales):
+        """
+        takes a 2D CWT matrix and saves the max score and the scale at which it appers for each
+        column
+        """
+        max_score_row_idxs = np.nanargmax(coefficients, axis=0)
+        col_idxs = np.arange(coefficients.shape[1])
+
+        max_scores = coefficients[max_score_row_idxs, col_idxs]
+        max_scales = scales[max_score_row_idxs]
+
+        return max_scores, max_scales
+
     def _process_cwt_matrix(self, ion, coefficients, scales):
         """
         Calculates ridge (R) valley (V) and zero-crossing (Z) bool matrices from the coefficients
@@ -587,7 +606,9 @@ class IntensityMatrix:
         """
 
         # get our RVZ matrices
-        R, V, Z = self._create_RVZ_matrices(coefficients, scales)
+        R, V, Z, max_scores, max_scales = self._create_RVZ_matrices(coefficients, scales)
+        self.cwt_scores[self.ion_map[ion]] = max_scores
+        self.cwt_scales[self.ion_map[ion]] = max_scales
 
         # get ridge coordinates
         ridge_info = self._trace_ridges(R, scales, ridge_tol=1, gap_tol=3)
@@ -611,11 +632,13 @@ class IntensityMatrix:
         # get raw signal
         raw = self.intensity_matrix[self.ion_map[ion]]
 
-        # smooth to find local maxima
+        # smooth signal and comptue derivatives
         signal = savgol_filter(raw, window_length=5, polyorder=2)
         self.first_derivs[self.ion_map[ion]] = savgol_filter(raw, window_length=5, polyorder=2, deriv=1)
         self.second_derivs[self.ion_map[ion]] = savgol_filter(raw, window_length=5, polyorder=2, deriv=2)
         self.smoothed_signal[self.ion_map[ion]] = signal
+
+        # find local maxima
         local_max_mask = signal == maximum_filter1d(signal,size=5)
         local_max_idxs = np.where(local_max_mask)[0]
 
@@ -887,8 +910,6 @@ class IntensityMatrix:
                         (nearest < len(signal)-1 and abs(signal[nearest+1] - signal[nearest]) < tol)
         if on_flat_top:
             nearest, l, r = self._snap_to_plateau_center(signal, nearest, tol_frac)
-            if ion == 147:
-                logger.info(f"Ion: {ion} l: {self.time_map[l]} RT: {self.time_map[nearest]} r: {self.time_map[r]}")
             return nearest, l, r
 
         return nearest, None, None
@@ -1043,6 +1064,13 @@ class IntensityMatrix:
                     seen_ridge_keys.add(key)
                     completed_ridges.append((ridge['points'], scale_range))
 
+        # compute ridge widths
+        ridge_widths = [max(j for _,j in points) - min(j for _,j in points) 
+                        for points,_ in completed_ridges]
+        if self.ridge_widths is None:
+            self.ridge_widths = []
+        self.ridge_widths.extend(ridge_widths)
+
         return completed_ridges
 
     def _get_ridge_scale_range(self,ridge,scales):
@@ -1061,18 +1089,25 @@ class IntensityMatrix:
         Z = np.zeros_like(coefficients, dtype=bool)
 
         # row-by row process coefficients matrix
+        smoothed_matrix = np.zeros_like(coefficients)
         for i,row in enumerate(coefficients):
 
             # get the scale for this row and use it to generate window/power for SG filter
+            """
             scale = scales[i]
             k = int(scale)
             window = k + 1
             if window % 2 == 0:
                 window += 1
             order = 1 if window == 3 else 2
+            """
+            window = 3
+            order = 1
+            k = 1
 
             # SG smooth the row
             smoothed = savgol_filter(row, window_length=window, polyorder=order)
+            smoothed_matrix[i] = smoothed
 
             # find zero crossings
             signs = np.sign(smoothed)
@@ -1095,8 +1130,10 @@ class IntensityMatrix:
             Z[i,:] = z_row
             R[i,:] = r_row
             V[i,:] = v_row
+        
+        max_scores, max_scales = self._max_scores_and_scales(smoothed_matrix, scales)
 
-        return R, V, Z
+        return R, V, Z, max_scores, max_scales
 
     # finds the left or right deconvolution bound for a given maxima, step = 1 for right bound step = -1 for left bound
     def find_bound(self, array, center, step, frac: float = 0.01, max_width: int = 25, sustain_n: int = 3):
