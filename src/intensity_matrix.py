@@ -414,6 +414,8 @@ class IntensityMatrix:
                 # caluclate valley ratio
                 valley_height = array[maxima[j]['right_bound']]
                 denom = min(array[peak['center']], array[next_peak['center']])
+                if denom <= 0:
+                    break
                 valley_ratio = valley_height / denom
 
                 # break if the valley ratio is small (cluster ends)

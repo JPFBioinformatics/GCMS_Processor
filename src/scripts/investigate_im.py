@@ -9,10 +9,6 @@ from itertools import combinations
 import hdbscan
 from sklearn.decomposition import PCA
 
-import warnings
-warnings.filterwarnings('error', category=RuntimeWarning)
-
-from src.intensity_matrix import IntensityMatrix as IM
 from src.scripts.helpers import (quantile_normalization, normalize_matrix, rolling_median_2d, 
                                  plot_histogram, plot_k_distance, plot_cluster_hexbin_facets,
                                  plot_multicluster_hexbins, plot_joint_scatter, plot_skree, 
@@ -26,7 +22,7 @@ import logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    filename=Path(__file__).parent / "investigate_im.log"
+    filename=Path(__file__).parent / "logs" / "investigate_im.log"
 )
 logger = logging.getLogger(__name__)
 

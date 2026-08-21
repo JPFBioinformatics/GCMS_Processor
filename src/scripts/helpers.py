@@ -2,42 +2,15 @@
 # region Imports
 
 import numpy as np
-from pathlib import Path
-from datetime import datetime
-from src.mzml_processor import create_scan_matrix
-from src.config_loader import ConfigLoader
-from src.plotting import plot_heatmap
 import matplotlib.pyplot as plt
-from src.utils import sanitize_name
-import json
-import itertools
 from matplotlib.backends.backend_pdf import PdfPages
 from itertools import combinations
-import hdbscan
-from sklearn.preprocessing import StandardScaler
-from sklearn.neighbors import KNeighborsClassifier, NearestNeighbors
+from sklearn.neighbors import NearestNeighbors
 from numpy.lib.stride_tricks import sliding_window_view
 from scipy.stats import gaussian_kde
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import QuantileTransformer
-
-import warnings
-warnings.filterwarnings('error', category=RuntimeWarning)
-
-from src.intensity_matrix import IntensityMatrix as IM
-
-
-# endregion
-
-# region logging
-
-import logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    filename=Path(__file__).parent / "cwt_test.log"
-)
-logger = logging.getLogger(__name__)
+from collections import Counter, defaultdict
 
 # endregion
 
@@ -444,7 +417,7 @@ def quantile_normalization(arr, output_distribution='normal', n_quantiles=1000):
         result[i] = qt.fit_transform(arr[i].reshape(-1,1)).ravel()
     return result
 
-def normalize_matrix(arr, axis=1, eps=1e-9, threshold=1e-6):
+def normalize_matrix(arr, axis=1, eps=1e-9, threshold=1e-6, norm_method='modz'):
 
     med = np.nanmedian(arr, axis=axis, keepdims=True)
     mad = np.nanmedian(np.abs(arr-med), axis=axis, keepdims=True) * 1.4826
@@ -452,7 +425,13 @@ def normalize_matrix(arr, axis=1, eps=1e-9, threshold=1e-6):
     global_fallback = np.nanmedian(mad[mad>threshold])
     scale = np.where(mad>threshold, mad, global_fallback)
 
-    return (arr-med) / (scale+eps)
+    modz_matrix = (arr-med) / (scale+eps)
+
+    # add additional compression to bring outlier scale to a more reasonable value
+    if norm_method == 'compressed':
+        return np.arcsinh(modz_matrix)
+    
+    return modz_matrix
 
 def subsampled_pca(X, n_components=None, sample_size=20_000):
 
@@ -582,8 +561,8 @@ def plot_gs_heatmaps(pdf, gs_params, results):
                 else:
                     i,j = np.unravel_index(np.nanargmin(grid), grid.shape)
                 max_vals_by_name = {
-                    param1:sorted_params[param1][i], 
-                    param2:sorted_params[param2][j], 
+                    param1:sorted_params[param1][i],
+                    param2:sorted_params[param2][j],
                     k:facet_val}
                 max_key = tuple(max_vals_by_name[name] for name in param_order)
                 max_vals = max_lookup[max_key]
@@ -605,3 +584,38 @@ def plot_gs_heatmaps(pdf, gs_params, results):
     results_labels = ['maximized_metric', 'faceted_prameter', 'min_cluster_size', 'min_samples', 'eps', 'n_clusters', 'noise_fraction', 'validity']
     table_data = [list(row) for row in maxes]
     plot_table(pdf, f"Best Combinations per-facet per-metric", table_data, results_labels)
+
+def plot_hdbscan_summary(pdf, results, top_n=3, n_clusters_max=5):
+    """
+    plots summary statistics for a given gridsearch of a given 
+    """
+
+    # pull out data from results
+    results_matrix = np.array(results)
+    results_matrix = results_matrix[~np.isnan(results_matrix[:6])]
+    if len(results_matrix) == 0:
+        return
+
+    seeds = results_matrix[:,0]
+    mcs_vals = results_matrix[:,1]
+    ms_vals = results_matrix[:,2]
+    cse_vals = results_matrix[:,3]
+    n_cluster_vals = results_matrix[:,4]
+    noise_frac_vals = results_matrix[:,5]
+    validity_vals = results_matrix[:,6]
+
+    # plot metric histograms
+    plot_histogram(pdf, 'n_clusters distribtution', 'n_clusters', n_cluster_vals)
+    plot_histogram(pdf, 'noise_frac distribution', 'noise_frac', noise_frac_vals)
+    plot_histogram(pdf, 'validity distribution', 'validity', validity_vals)
+
+    # plot parameter combination histograms
+    cluster_mask = n_cluster_vals < n_clusters_max
+    mcs_f = mcs_vals[cluster_mask]
+    ms_f = ms_vals[cluster_mask]
+    cse_f = cse_vals[cluster_mask]
+    validity_f = validity_vals[cluster_mask]
+    seeds_f = seeds[cluster_mask]
+
+
+

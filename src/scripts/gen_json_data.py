@@ -6,9 +6,6 @@ from src.mzml_processor import create_scan_matrix
 from src.config_loader import ConfigLoader
 import json
 
-import warnings
-warnings.filterwarnings('error', category=RuntimeWarning)
-
 from src.intensity_matrix import IntensityMatrix as IM
 
 # endregion
@@ -19,7 +16,7 @@ import logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    filename=Path(__file__).parent / "gen_json_data.log"
+    filename=Path(__file__).parent / "logs" / "gen_json_data.log"
 )
 logger = logging.getLogger(__name__)
 
@@ -34,7 +31,7 @@ peak_mode = cfg.get('peak_mode')
 
 starttime = datetime.now()
 
-im = create_scan_matrix(file_path, cfg=cfg, apply_thresholds = False)
+im = create_scan_matrix(file_path, cfg=cfg, apply_threshold = False)
 
 endtime = datetime.now()
 
